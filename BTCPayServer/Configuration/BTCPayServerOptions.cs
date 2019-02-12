@@ -15,6 +15,8 @@ using Renci.SshNet;
 using NBitcoin.DataEncoders;
 using BTCPayServer.SSH;
 using BTCPayServer.Lightning;
+using BTCPayServer.Configuration.External;
+using Serilog.Events;
 
 namespace BTCPayServer.Configuration
 {
@@ -36,6 +38,12 @@ namespace BTCPayServer.Configuration
             get;
             private set;
         }
+
+        public string LogFile
+        {
+            get;
+            private set;
+        }
         public string DataDir
         {
             get;
@@ -52,6 +60,22 @@ namespace BTCPayServer.Configuration
             get;
             set;
         } = new List<NBXplorerConnectionSetting>();
+
+        public bool DisableRegistration
+        {
+            get;
+            private set;
+        }
+
+        public static string GetDebugLog(IConfiguration configuration)
+        {
+            return configuration.GetValue<string>("debuglog", null);
+        }
+        public static LogEventLevel GetDebugLogLevel(IConfiguration configuration)
+        {
+            var raw = configuration.GetValue("debugloglevel", nameof(LogEventLevel.Debug));
+            return (LogEventLevel)Enum.Parse(typeof(LogEventLevel), raw, true);
+        }
 
         public void LoadArgs(IConfiguration conf)
         {
@@ -78,6 +102,7 @@ namespace BTCPayServer.Configuration
                 setting.ExplorerUri = conf.GetOrDefault<Uri>($"{net.CryptoCode}.explorer.url", net.NBXplorerNetwork.DefaultSettings.DefaultUrl);
                 setting.CookieFile = conf.GetOrDefault<string>($"{net.CryptoCode}.explorer.cookiefile", net.NBXplorerNetwork.DefaultSettings.DefaultCookieFile);
                 NBXplorerConnectionSettings.Add(setting);
+
                 {
                     var lightning = conf.GetOrDefault<string>($"{net.CryptoCode}.lightning", string.Empty);
                     if (lightning.Length != 0)
@@ -85,7 +110,7 @@ namespace BTCPayServer.Configuration
                         if (!LightningConnectionString.TryParse(lightning, true, out var connectionString, out var error))
                         {
                             throw new ConfigException($"Invalid setting {net.CryptoCode}.lightning, " + Environment.NewLine +
-                                $"If you have a lightning server use: 'type=clightning;server=/root/.lightning/lightning-rpc', " + Environment.NewLine +
+                                $"If you have a c-lightning server use: 'type=clightning;server=/root/.lightning/lightning-rpc', " + Environment.NewLine +
                                 $"If you have a lightning charge server: 'type=charge;server=https://charge.example.com;api-token=yourapitoken'" + Environment.NewLine +
                                 $"If you have a lnd server: 'type=lnd-rest;server=https://lnd:lnd@lnd.example.com;macaroon=abf239...;certthumbprint=2abdf302...'" + Environment.NewLine +
                                 $"              lnd server: 'type=lnd-rest;server=https://lnd:lnd@lnd.example.com;macaroonfilepath=/root/.lnd/admin.macaroon;certthumbprint=2abdf302...'" + Environment.NewLine +
@@ -93,31 +118,77 @@ namespace BTCPayServer.Configuration
                         }
                         if (connectionString.IsLegacy)
                         {
-                            Logs.Configuration.LogWarning($"Setting {net.CryptoCode}.lightning will work but use an deprecated format, please replace it by '{connectionString.ToString()}'");
+                            Logs.Configuration.LogWarning($"Setting {net.CryptoCode}.lightning is a deprecated format, it will work now, but please replace it for future versions with '{connectionString.ToString()}'");
                         }
                         InternalLightningByCryptoCode.Add(net.CryptoCode, connectionString);
                     }
                 }
 
+                void externalLnd<T>(string code, string lndType)
                 {
-                    var lightning = conf.GetOrDefault<string>($"{net.CryptoCode}.external.lnd.grpc", string.Empty);
+                    var lightning = conf.GetOrDefault<string>(code, string.Empty);
                     if (lightning.Length != 0)
                     {
                         if (!LightningConnectionString.TryParse(lightning, false, out var connectionString, out var error))
                         {
-                            throw new ConfigException($"Invalid setting {net.CryptoCode}.external.lnd.grpc, " + Environment.NewLine +
-                                $"lnd server: 'type=lnd-grpc;server=https://lnd.example.com;macaroon=abf239...;certthumbprint=2abdf302...'" + Environment.NewLine +
-                                $"lnd server: 'type=lnd-grpc;server=https://lnd.example.com;macaroonfilepath=/root/.lnd/admin.macaroon;certthumbprint=2abdf302...'" + Environment.NewLine +
+                            throw new ConfigException($"Invalid setting {code}, " + Environment.NewLine +
+                                $"lnd server: 'type={lndType};server=https://lnd.example.com;macaroon=abf239...;certthumbprint=2abdf302...'" + Environment.NewLine +
+                                $"lnd server: 'type={lndType};server=https://lnd.example.com;macaroonfilepath=/root/.lnd/admin.macaroon;certthumbprint=2abdf302...'" + Environment.NewLine +
                                 error);
                         }
-                        ExternalServicesByCryptoCode.Add(net.CryptoCode, new ExternalLNDGRPC(connectionString));
+                        var instanceType = typeof(T);
+                        ExternalServicesByCryptoCode.Add(net.CryptoCode, (ExternalService)Activator.CreateInstance(instanceType, connectionString));
                     }
+                };
+
+                externalLnd<ExternalLndGrpc>($"{net.CryptoCode}.external.lnd.grpc", "lnd-grpc");
+                externalLnd<ExternalLndRest>($"{net.CryptoCode}.external.lnd.rest", "lnd-rest");
+
+                var spark = conf.GetOrDefault<string>($"{net.CryptoCode}.external.spark", string.Empty);
+                if (spark.Length != 0)
+                {
+                    if (!SparkConnectionString.TryParse(spark, out var connectionString))
+                    {
+                        throw new ConfigException($"Invalid setting {net.CryptoCode}.external.spark, " + Environment.NewLine +
+                            $"Valid example: 'server=https://btcpay.example.com/spark/btc/;cookiefile=/etc/clightning_bitcoin_spark/.cookie'");
+                    }
+                    ExternalServicesByCryptoCode.Add(net.CryptoCode, new ExternalSpark(connectionString));
+                }
+
+                var charge = conf.GetOrDefault<string>($"{net.CryptoCode}.external.charge", string.Empty);
+                if (charge.Length != 0)
+                {
+                    if (!LightningConnectionString.TryParse(charge, false, out var chargeConnectionString, out var chargeError))
+                        LightningConnectionString.TryParse("type=charge;" + charge, false, out chargeConnectionString, out chargeError);
+
+                    if(chargeConnectionString == null || chargeConnectionString.ConnectionType != LightningConnectionType.Charge)
+                    {
+                        throw new ConfigException($"Invalid setting {net.CryptoCode}.external.charge, " + Environment.NewLine +
+                                $"lightning charge server: 'type=charge;server=https://charge.example.com;api-token=2abdf302...'" + Environment.NewLine +
+                                $"lightning charge server: 'type=charge;server=https://charge.example.com;cookiefilepath=/root/.charge/.cookie'" + Environment.NewLine +
+                                chargeError ?? string.Empty);
+                    }
+                    ExternalServicesByCryptoCode.Add(net.CryptoCode, new ExternalCharge(chargeConnectionString));
                 }
             }
 
             Logs.Configuration.LogInformation("Supported chains: " + String.Join(',', supportedChains.ToArray()));
 
+            var services = conf.GetOrDefault<string>("externalservices", null);
+            if (services != null)
+            {
+                foreach (var service in services.Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries)
+                                                .Select(p => (p, SeparatorIndex: p.IndexOf(':', StringComparison.OrdinalIgnoreCase)))
+                                                .Where(p => p.SeparatorIndex != -1)
+                                                .Select(p => (Name: p.p.Substring(0, p.SeparatorIndex), 
+                                                              Link: p.p.Substring(p.SeparatorIndex + 1))))
+                {
+                    ExternalServices.AddOrReplace(service.Name, service.Link);
+                }
+            }
+
             PostgresConnectionString = conf.GetOrDefault<string>("postgres", null);
+            MySQLConnectionString = conf.GetOrDefault<string>("mysql", null);
             BundleJsCss = conf.GetOrDefault<bool>("bundlejscss", true);
             ExternalUrl = conf.GetOrDefault<Uri>("externalurl", null);
 
@@ -127,12 +198,12 @@ namespace BTCPayServer.Configuration
                 int waitTime = 0;
                 while (!string.IsNullOrEmpty(sshSettings.KeyFile) && !File.Exists(sshSettings.KeyFile))
                 {
-                    if(waitTime++ < 5)
+                    if (waitTime++ < 5)
                         System.Threading.Thread.Sleep(1000);
                     else
                         throw new ConfigException($"sshkeyfile does not exist");
                 }
-                    
+
                 if (sshSettings.Port > ushort.MaxValue ||
                    sshSettings.Port < ushort.MinValue)
                     throw new ConfigException($"ssh port is invalid");
@@ -165,7 +236,16 @@ namespace BTCPayServer.Configuration
                 RootPath = "/" + RootPath;
             var old = conf.GetOrDefault<Uri>("internallightningnode", null);
             if (old != null)
-                throw new ConfigException($"internallightningnode should not be used anymore, use btclightning instead");
+                throw new ConfigException($"internallightningnode is deprecated and should not be used anymore, use btclightning instead");
+
+            LogFile = GetDebugLog(conf);
+            if (!string.IsNullOrEmpty(LogFile))
+            {
+                Logs.Configuration.LogInformation("LogFile: " + LogFile);
+                Logs.Configuration.LogInformation("Log Level: " + GetDebugLogLevel(conf));
+            }
+
+            DisableRegistration = conf.GetOrDefault<bool>("disable-registration", true);
         }
 
         private SSHSettings ParseSSHConfiguration(IConfiguration conf)
@@ -216,10 +296,17 @@ namespace BTCPayServer.Configuration
 
         public string RootPath { get; set; }
         public Dictionary<string, LightningConnectionString> InternalLightningByCryptoCode { get; set; } = new Dictionary<string, LightningConnectionString>();
+        public Dictionary<string, string> ExternalServices { get; set; } = new Dictionary<string, string>();
+
         public ExternalServices ExternalServicesByCryptoCode { get; set; } = new ExternalServices();
 
         public BTCPayNetworkProvider NetworkProvider { get; set; }
         public string PostgresConnectionString
+        {
+            get;
+            set;
+        }
+        public string MySQLConnectionString
         {
             get;
             set;
@@ -249,30 +336,5 @@ namespace BTCPayServer.Configuration
             builder.Path = RootPath;
             return builder.ToString();
         }
-    }
-
-    public class ExternalServices : MultiValueDictionary<string, ExternalService>
-    {
-        public IEnumerable<T> GetServices<T>(string cryptoCode) where T : ExternalService
-        {
-            if (!this.TryGetValue(cryptoCode.ToUpperInvariant(), out var services))
-                return Array.Empty<T>();
-            return services.OfType<T>();
-        }
-    }
-
-    public class ExternalService
-    {
-
-    }
-
-    public class ExternalLNDGRPC : ExternalService
-    {
-        public ExternalLNDGRPC(LightningConnectionString connectionString)
-        {
-            ConnectionString = connectionString;
-        }
-
-        public LightningConnectionString ConnectionString { get; set; }
     }
 }

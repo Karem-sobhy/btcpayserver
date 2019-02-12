@@ -22,6 +22,7 @@ using BTCPayServer.Tests.Lnd;
 using BTCPayServer.Payments.Lightning;
 using BTCPayServer.Lightning.CLightning;
 using BTCPayServer.Lightning;
+using BTCPayServer.Services;
 
 namespace BTCPayServer.Tests
 {
@@ -60,7 +61,9 @@ namespace BTCPayServer.Tests
             {
                 NBXplorerUri = ExplorerClient.Address,
                 LTCNBXplorerUri = LTCExplorerClient.Address,
+                TestDatabase = Enum.Parse<TestDatabases>(GetEnvironment("TESTS_DB", TestDatabases.Postgres.ToString()), true),
                 Postgres = GetEnvironment("TESTS_POSTGRES", "User ID=postgres;Host=127.0.0.1;Port=39372;Database=btcpayserver"),
+                MySQL = GetEnvironment("TESTS_MYSQL", "User ID=root;Host=127.0.0.1;Port=33036;Database=btcpayserver"),
                 IntegratedLightning = MerchantCharge.Client.Uri
             };
             PayTester.Port = int.Parse(GetEnvironment("TESTS_PORT", Utils.FreeTcpPort().ToString(CultureInfo.InvariantCulture)), CultureInfo.InvariantCulture);
@@ -82,7 +85,7 @@ namespace BTCPayServer.Tests
         /// Connect a customer LN node to the merchant LN node
         /// </summary>
         /// <returns></returns>
-        public Task EnsureConnectedToDestinations()
+        public Task EnsureChannelsSetup()
         {
             return BTCPayServer.Lightning.Tests.ConnectChannels.ConnectAll(ExplorerNode, GetLightningSenderClients(), GetLightningDestClients());
         }
@@ -150,6 +153,7 @@ namespace BTCPayServer.Tests
         {
             get; set;
         }
+
         public List<string> Stores { get; internal set; } = new List<string>();
 
         public void Dispose()

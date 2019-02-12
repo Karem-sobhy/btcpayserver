@@ -15,9 +15,24 @@
             max-width: 400px;
         }
     }
+
+    .unconf {
+        opacity: 0.5;
+    }
 </style>
 
+<div class="row">
+    <div class="col-md-10 text-center">
+        <partial name="_StatusMessage" for="@TempData["TempDataProperty-StatusMessage"]" />
+    </div>
+</div>
 <h4>@ViewData["Title"]</h4>
+<div class="row">
+    <div class="col-md-10">
+        If BTCPay Server shows you an invalid balance, <a asp-action="WalletRescan">rescan your wallet</a>. <br />
+        If some transactions appear in BTCPay Server, but are missing on Electrum or another wallet, <a href="https://docs.btcpayserver.org/faq-and-common-issues/faq-wallet#missing-payments-in-my-software-or-hardware-wallet">follow those instructions</a>.
+    </div>
+</div>
 <div class="row">
     <div class="col-md-10">
         <table class="table table-sm table-responsive-lg">
@@ -29,16 +44,16 @@
                 </tr>
             </thead>
             <tbody>
-                @foreach(var transaction in Model.Transactions)
+                @foreach (var transaction in Model.Transactions)
                 {
-                    <tr>
-                        <td>@transaction.Timestamp.ToBrowserDate()</td>
+                    <tr class="@(transaction.IsConfirmed ? "" : "unconf")">
+                        <td>@transaction.Timestamp.ToTimeAgo()</td>
                         <td class="smMaxWidth text-truncate">
                             <a href="@transaction.Link" target="_blank">
                                 @transaction.Id
                             </a>
                         </td>
-                        @if(transaction.Positive)
+                        @if (transaction.Positive)
                         {
                             <td style="text-align:right; color:green;">@transaction.Balance</td>
                         }

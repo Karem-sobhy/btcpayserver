@@ -20,11 +20,18 @@ function resetTabsSlider() {
     closePaymentMethodDialog(null);
 }
 
-function onDataCallback(jsonData) {
-    // extender properties used 
-    jsonData.shapeshiftUrl = "https://shapeshift.io/shifty.html?destination=" + jsonData.btcAddress + "&output=" + jsonData.paymentMethodId + "&amount=" + jsonData.btcDue;
-    //
+function changeCurrency(currency) {
+    if (currency !== null && srvModel.paymentMethodId !== currency) {
+        $(".payment__currencies").hide();
+        $(".payment__spinner").show();
+        checkoutCtrl.scanDisplayQr = "";
+        srvModel.paymentMethodId = currency;
+        fetchStatus();
+    }
+    return false;
+}
 
+function onDataCallback(jsonData) {
     var newStatus = jsonData.status;
 
     if (newStatus === "complete" ||
@@ -61,29 +68,35 @@ function onDataCallback(jsonData) {
     }
 
     // restoring qr code view only when currency is switched
+    if (jsonData.paymentMethodId === srvModel.paymentMethodId &&
+        checkoutCtrl.scanDisplayQr === "") {
+        checkoutCtrl.scanDisplayQr = jsonData.invoiceBitcoinUrlQR;
+    }
+
     if (jsonData.paymentMethodId === srvModel.paymentMethodId) {
         $(".payment__currencies").show();
         $(".payment__spinner").hide();
+    }
+
+    if (jsonData.isLightning && checkoutCtrl.lndModel === null) {
+        var lndModel = {
+            toggle: 0
+        };
+
+        checkoutCtrl.lndModel = lndModel;
+    }
+
+    if (!jsonData.isLightning) {
+        checkoutCtrl.lndModel = null;
     }
 
     // updating ui
     checkoutCtrl.srvModel = jsonData;
 }
 
-function changeCurrency(currency) {
-    if (currency !== null && srvModel.paymentMethodId !== currency) {
-        $(".payment__currencies").hide();
-        $(".payment__spinner").show();
-        srvModel.paymentMethodId = currency;
-        fetchStatus();
-    }
-    return false;
-}
-
 function fetchStatus() {
-    var path = srvModel.serverUrl + "/i/" + srvModel.invoiceId + "/" + srvModel.paymentMethodId + "/status";
     $.ajax({
-        url: path,
+        url: window.location.pathname + "/status?invoiceId=" + srvModel.invoiceId + "&paymentMethodId=" + srvModel.paymentMethodId,
         type: "GET",
         cache: false
     }).done(function (data) {
@@ -93,36 +106,44 @@ function fetchStatus() {
     });
 }
 
+function lndToggleBolt11() {
+    checkoutCtrl.lndModel.toggle = 0;
+    checkoutCtrl.scanDisplayQr = checkoutCtrl.srvModel.invoiceBitcoinUrlQR;
+}
+
+function lndToggleNode() {
+    checkoutCtrl.lndModel.toggle = 1;
+    checkoutCtrl.scanDisplayQr = checkoutCtrl.srvModel.peerInfo;
+}
+
 // private methods
 $(document).ready(function () {
     // initialize
     onDataCallback(srvModel);
-
-    /* TAF
-    
-    - Version mobile
-    
-    - Réparer le décallage par timer
-    
-    - Preparer les variables de l'API
-    
-    - Gestion des differents evenements en fonction du status de l'invoice
-    
-    - sécuriser les CDN
-    
-    */
 
     // check if the Document expired
     if (srvModel.expirationSeconds > 0) {
         progressStart(srvModel.maxTimeSeconds); // Progress bar
 
         if (srvModel.requiresRefundEmail && !validateEmail(srvModel.customerEmail))
-            emailForm(); // Email form Display
+            showEmailForm();
         else
             hideEmailForm();
     }
 
+    $(".close-action").on("click", function () {
+        $("invoice").fadeOut(300, function () {
+            window.parent.postMessage("close", "*");
+        });
+    });
 
+    window.parent.postMessage("loaded", "*");
+    jQuery("invoice").fadeOut(0);
+    jQuery("invoice").fadeIn(300);
+
+    // eof initialize
+
+    // FUNCTIONS
     function hideEmailForm() {
         $("#emailAddressView").removeClass("active");
         $("placeholder-refundEmail").html(srvModel.customerEmail);
@@ -133,7 +154,7 @@ $(document).ready(function () {
     }
     // Email Form
     // Setup Email mode
-    function emailForm() {
+    function showEmailForm() {
         $(".modal-dialog").addClass("enter-purchaser-email");
 
         $("#emailAddressForm .action-button").click(function () {
@@ -142,11 +163,8 @@ $(document).ready(function () {
                 $("#emailAddressForm .input-wrapper bp-loading-button .action-button").addClass("loading");
                 // Push the email to a server, once the reception is confirmed move on
                 srvModel.customerEmail = emailAddress;
-
-                var path = srvModel.serverUrl + "/i/" + srvModel.invoiceId + "/UpdateCustomer";
-
                 $.ajax({
-                    url: path,
+                    url: window.location.pathname + "/UpdateCustomer?invoiceId=" + srvModel.invoiceId,
                     type: "POST",
                     data: JSON.stringify({ Email: srvModel.customerEmail }),
                     contentType: "application/json; charset=utf-8"
@@ -218,13 +236,21 @@ $(document).ready(function () {
 
     var supportsWebSockets = 'WebSocket' in window && window.WebSocket.CLOSING === 2;
     if (supportsWebSockets) {
-        var path = srvModel.serverUrl + "/i/" + srvModel.invoiceId + "/status/ws";
-        path = path.replace("https://", "wss://");
-        path = path.replace("http://", "ws://");
+        var loc = window.location, ws_uri;
+        if (loc.protocol === "https:") {
+            ws_uri = "wss:";
+        } else {
+            ws_uri = "ws:";
+        }
+        ws_uri += "//" + loc.host;
+        ws_uri += loc.pathname + "/status/ws?invoiceId=" + srvModel.invoiceId;
         try {
-            var socket = new WebSocket(path);
+            var socket = new WebSocket(ws_uri);
             socket.onmessage = function (e) {
                 fetchStatus();
+            };
+            socket.onerror = function (e) {
+                console.error("Error while connecting to websocket for invoice notifications (callback)");
             };
         }
         catch (e) {

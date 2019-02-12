@@ -47,14 +47,18 @@ namespace BTCPayServer
             NetworkType = networkType;
             InitBitcoin();
             InitLitecoin();
+            InitBitcore();
             InitDogecoin();
             InitBitcoinGold();
             InitMonacoin();
             InitDash();
-            InitPolis();
             InitFeathercoin();
             InitGroestlcoin();
             InitViacoin();
+
+            // Disabled because of https://twitter.com/Cryptopia_NZ/status/1085084168852291586
+            //InitPolis();
+            //InitBitcoinplus();
             //InitUfo();
         }
 

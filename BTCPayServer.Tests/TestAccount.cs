@@ -17,6 +17,7 @@ using BTCPayServer.Payments.Lightning;
 using BTCPayServer.Tests.Logging;
 using BTCPayServer.Lightning;
 using BTCPayServer.Lightning.CLightning;
+using BTCPayServer.Data;
 
 namespace BTCPayServer.Tests
 {
@@ -58,6 +59,21 @@ namespace BTCPayServer.Tests
             CreateStoreAsync().GetAwaiter().GetResult();
         }
 
+        public void SetNetworkFeeMode(NetworkFeeMode mode)
+        {
+            ModifyStore((store) =>
+            {
+                store.NetworkFeeMode = mode;
+            });
+        }
+        public void ModifyStore(Action<StoreViewModel> modify)
+        {
+            var storeController = GetController<StoresController>();
+            StoreViewModel store = (StoreViewModel)((ViewResult)storeController.UpdateStore()).Model;
+            modify(store);
+            storeController.UpdateStore(store).GetAwaiter().GetResult();
+        }
+
         public T GetController<T>(bool setImplicitStore = true) where T : Controller
         {
             return parent.PayTester.GetController<T>(UserId, setImplicitStore ? StoreId : null);
@@ -73,25 +89,23 @@ namespace BTCPayServer.Tests
 
         public BTCPayNetwork SupportedNetwork { get; set; }
 
-        public void RegisterDerivationScheme(string crytoCode)
+        public WalletId RegisterDerivationScheme(string crytoCode, bool segwit = false)
         {
-            RegisterDerivationSchemeAsync(crytoCode).GetAwaiter().GetResult();
+            return RegisterDerivationSchemeAsync(crytoCode, segwit).GetAwaiter().GetResult();
         }
-        public async Task RegisterDerivationSchemeAsync(string cryptoCode)
+        public async Task<WalletId> RegisterDerivationSchemeAsync(string cryptoCode, bool segwit = false)
         {
             SupportedNetwork = parent.NetworkProvider.GetNetwork(cryptoCode);
             var store = parent.PayTester.GetController<StoresController>(UserId, StoreId);
             ExtKey = new ExtKey().GetWif(SupportedNetwork.NBitcoinNetwork);
-            DerivationScheme = new DerivationStrategyFactory(SupportedNetwork.NBitcoinNetwork).Parse(ExtKey.Neuter().ToString() + "-[legacy]");
-            var vm = (StoreViewModel)((ViewResult)store.UpdateStore()).Model;
-            vm.SpeedPolicy = SpeedPolicy.MediumSpeed;
-            await store.UpdateStore(vm);
-
+            DerivationScheme = new DerivationStrategyFactory(SupportedNetwork.NBitcoinNetwork).Parse(ExtKey.Neuter().ToString() + (segwit ? "" : "-[legacy]"));
             await store.AddDerivationScheme(StoreId, new DerivationSchemeViewModel()
             {
                 DerivationScheme = DerivationScheme.ToString(),
                 Confirmation = true
             }, cryptoCode);
+
+            return new WalletId(StoreId, cryptoCode);
         }
 
         public DerivationStrategyBase DerivationScheme { get; set; }

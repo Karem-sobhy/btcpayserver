@@ -32,6 +32,7 @@ using System.Globalization;
 using BTCPayServer.Services;
 using BTCPayServer.Data;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using NBXplorer.DerivationStrategy;
 
 namespace BTCPayServer
 {
@@ -128,6 +129,19 @@ namespace BTCPayServer
                 resp.Headers[name] = value;
         }
 
+        public static bool IsSegwit(this DerivationStrategyBase derivationStrategyBase)
+        {
+            if (IsSegwitCore(derivationStrategyBase))
+                return true;
+            return (derivationStrategyBase is P2SHDerivationStrategy p2shStrat && IsSegwitCore(p2shStrat.Inner));
+        }
+
+        private static bool IsSegwitCore(DerivationStrategyBase derivationStrategyBase)
+        {
+            return (derivationStrategyBase is P2WSHDerivationStrategy) ||
+                            (derivationStrategyBase is DirectDerivationStrategy direct) && direct.Segwit;
+        }
+
         public static string GetAbsoluteRoot(this HttpRequest request)
         {
             return string.Concat(
@@ -152,6 +166,41 @@ namespace BTCPayServer
             return string.Concat(
                         request.PathBase.ToUriComponent(),
                         request.Path.ToUriComponent());
+        }
+
+        /// <summary>
+        /// If 'toto' and RootPath is 'rootpath' returns '/rootpath/toto'
+        /// If 'toto' and RootPath is empty returns '/toto'
+        /// </summary>
+        /// <param name="request"></param>
+        /// <param name="path"></param>
+        /// <returns></returns>
+        public static string GetRelativePath(this HttpRequest request, string path)
+        {
+            if (path.Length > 0 && path[0] != '/')
+                path = $"/{path}";
+            return string.Concat(
+                        request.PathBase.ToUriComponent(),
+                        path);
+        }
+
+        /// <summary>
+        /// If 'https://example.com/toto' returns 'https://example.com/toto'
+        /// If 'toto' and RootPath is 'rootpath' returns '/rootpath/toto'
+        /// If 'toto' and RootPath is empty returns '/toto'
+        /// </summary>
+        /// <param name="request"></param>
+        /// <param name="path"></param>
+        /// <returns></returns>
+        public static string GetRelativePathOrAbsolute(this HttpRequest request, string path)
+        {
+            if (Uri.TryCreate(path, UriKind.Absolute, out var unused))
+                return path;
+            if (path.Length > 0 && path[0] != '/')
+                path = $"/{path}";
+            return string.Concat(
+                        request.PathBase.ToUriComponent(),
+                        path);
         }
 
         public static string GetAbsoluteUri(this HttpRequest request, string redirectUrl)

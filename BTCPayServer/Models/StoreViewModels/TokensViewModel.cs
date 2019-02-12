@@ -1,4 +1,4 @@
-﻿using BTCPayServer.Validations;
+﻿using BTCPayServer.Validation;
 using Microsoft.AspNetCore.Mvc.Rendering;
 using System;
 using System.Collections.Generic;
@@ -72,5 +72,6 @@ namespace BTCPayServer.Models.StoreViewModels
         [Display(Name = "API Key")]
         public string ApiKey { get; set; }
         public string EncodedApiKey { get; set; }
+        public bool StoreNotConfigured { get; set; }
     }
 }

@@ -31,7 +31,9 @@ namespace BTCPayServer.Configuration
             app.Option("--regtest | -regtest", $"Use regtest (deprecated, use --network instead)", CommandOptionType.BoolValue);
             app.Option("--chains | -c", $"Chains to support as a comma separated (default: btc; available: {chains})", CommandOptionType.SingleValue);
             app.Option("--postgres", $"Connection string to a PostgreSQL database (default: SQLite)", CommandOptionType.SingleValue);
+            app.Option("--mysql", $"Connection string to a MySQL database (default: SQLite)", CommandOptionType.SingleValue);
             app.Option("--externalurl", $"The expected external URL of this service, to use if BTCPay is behind a reverse proxy (default: empty, use the incoming HTTP request to figure out)", CommandOptionType.SingleValue);
+            app.Option("--externalservices", $"Links added to external services inside Server Settings / Services under the format service1:path2;service2:path2.(default: empty)", CommandOptionType.SingleValue);
             app.Option("--bundlejscss", $"Bundle JavaScript and CSS files for better performance (default: true)", CommandOptionType.SingleValue);
             app.Option("--rootpath", "The root path in the URL to access BTCPay (default: /)", CommandOptionType.SingleValue);
             app.Option("--sshconnection", "SSH server to manage BTCPay under the form user@server:port (default: root@externalhost or empty)", CommandOptionType.SingleValue);
@@ -39,6 +41,9 @@ namespace BTCPayServer.Configuration
             app.Option("--sshkeyfile", "SSH private key file to manage BTCPay (default: empty)", CommandOptionType.SingleValue);
             app.Option("--sshkeyfilepassword", "Password of the SSH keyfile (default: empty)", CommandOptionType.SingleValue);
             app.Option("--sshtrustedfingerprints", "SSH Host public key fingerprint or sha256 (default: empty, it will allow untrusted connections)", CommandOptionType.SingleValue);
+            app.Option("--debuglog", "A rolling log file for debug messages.", CommandOptionType.SingleValue);
+            app.Option("--debugloglevel", "The severity you log (default:information)", CommandOptionType.SingleValue);
+            app.Option("--disable-registration", "Disables new user registrations (default:true)", CommandOptionType.SingleValue);
             foreach (var network in provider.GetAll())
             {
                 var crypto = network.CryptoCode.ToLowerInvariant();
@@ -46,6 +51,8 @@ namespace BTCPayServer.Configuration
                 app.Option($"--{crypto}explorercookiefile", $"Path to the cookie file (default: {network.NBXplorerNetwork.DefaultSettings.DefaultCookieFile})", CommandOptionType.SingleValue);
                 app.Option($"--{crypto}lightning", $"Easy configuration of lightning for the server administrator: Must be a UNIX socket of c-lightning (lightning-rpc) or URL to a charge server (default: empty)", CommandOptionType.SingleValue);
                 app.Option($"--{crypto}externallndgrpc", $"The LND gRPC configuration BTCPay will expose to easily connect to the internal lnd wallet from Zap wallet (default: empty)", CommandOptionType.SingleValue);
+                app.Option($"--{crypto}externalspark", $"Show spark information in Server settings / Server. The connection string to spark server (default: empty)", CommandOptionType.SingleValue);
+                app.Option($"--{crypto}externalcharge", $"Show lightning charge information in Server settings/Server. The connection string to charge server (default: empty)", CommandOptionType.SingleValue);
             }
             return app;
         }
@@ -104,9 +111,12 @@ namespace BTCPayServer.Configuration
             builder.AppendLine("### Server settings ###");
             builder.AppendLine("#port=" + defaultSettings.DefaultPort);
             builder.AppendLine("#bind=127.0.0.1");
+            builder.AppendLine("#httpscertificatefilepath=devtest.pfx");
+            builder.AppendLine("#httpscertificatefilepassword=toto");
             builder.AppendLine();
             builder.AppendLine("### Database ###");
             builder.AppendLine("#postgres=User ID=root;Password=myPassword;Host=localhost;Port=5432;Database=myDataBase;");
+            builder.AppendLine("#mysql=User ID=root;Password=myPassword;Host=localhost;Port=3306;Database=myDataBase;");
             builder.AppendLine();
             builder.AppendLine("### NBXplorer settings ###");
             foreach (var n in new BTCPayNetworkProvider(networkType).GetAll())

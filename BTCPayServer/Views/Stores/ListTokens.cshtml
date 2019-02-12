@@ -5,6 +5,13 @@
 }
 
 <partial name="_StatusMessage" for="StatusMessage" />
+@if (Model.StoreNotConfigured)
+{
+    <div class="alert alert-warning alert-dismissible" role="alert">
+        <button type="button" class="close" data-dismiss="alert" aria-label="Close"><span aria-hidden="true">&times;</span></button>
+        <span>Warning: No wallet has been linked to your BTCPay Store. See <a href="https://docs.btcpayserver.org/btcpay-basics/gettingstarted#connecting-btcpay-store-to-your-wallet" target="_blank">this link</a> for more information on how to connect your store and wallet.</span>
+    </div>
+}
 <h4>Access token</h4>
 <div class="row">
     <div class="col-md-8">
@@ -18,23 +25,18 @@
             <thead>
                 <tr>
                     <th>Label</th>
-                    <th>SIN</th>
                     <th>Facade</th>
-                    <th>Actions</th>
+                    <th class="text-right">Actions</th>
                 </tr>
             </thead>
             <tbody>
-                @foreach(var token in Model.Tokens)
+                @foreach (var token in Model.Tokens)
                 {
                     <tr>
                         <td>@token.Label</td>
-                        <td>@token.SIN</td>
                         <td>@token.Facade</td>
-                        <td>
-                            <form asp-action="DeleteToken" method="post">
-                                <input type="hidden" name="tokenId" value="@token.Id">
-                                <button type="submit" class="btn btn-danger" role="button">Revoke</button>
-                            </form>
+                        <td class="text-right">
+                            <a asp-action="ShowToken" asp-route-tokenId="@token.Id">See information</a> - <a asp-action="RevokeToken" asp-route-tokenId="@token.Id">Revoke</a>
                         </td>
                     </tr>
                 }

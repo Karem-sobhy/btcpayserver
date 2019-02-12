@@ -40,6 +40,12 @@ namespace BTCPayServer.Models
     //{"facade":"pos/invoice","data":{,}}
     public class InvoiceResponse
     {
+        [JsonIgnore]
+        public string StoreId
+        {
+            get; set;
+        }
+        
         //"url":"https://test.bitpay.com/invoice?id=9saCHtp1zyPcNoi3rDdBu8"
         [JsonProperty("url")]
         public string Url
@@ -80,6 +86,12 @@ namespace BTCPayServer.Models
         //"price":5
         [JsonProperty("price")]
         public decimal Price
+        {
+            get; set;
+        }
+
+        [JsonProperty("taxIncluded", DefaultValueHandling = DefaultValueHandling.Ignore)]
+        public decimal TaxIncluded
         {
             get; set;
         }
@@ -247,6 +259,8 @@ namespace BTCPayServer.Models
         public Dictionary<string, string> Addresses { get; set; }
         [JsonProperty("paymentCodes")]
         public Dictionary<string, NBitpayClient.InvoicePaymentUrls> PaymentCodes { get; set; }
+        [JsonProperty("buyer")]
+        public JObject Buyer { get; set; }
     }
     public class Flags
     {

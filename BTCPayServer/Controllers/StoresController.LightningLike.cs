@@ -27,7 +27,8 @@ namespace BTCPayServer.Controllers
             LightningNodeViewModel vm = new LightningNodeViewModel
             {
                 CryptoCode = cryptoCode,
-                InternalLightningNode = GetInternalLighningNode(cryptoCode)?.ToString()
+                InternalLightningNode = GetInternalLighningNode(cryptoCode)?.ToString(),
+                StoreId = storeId
             };
             SetExistingValues(store, vm);
             return View(vm);
@@ -114,7 +115,7 @@ namespace BTCPayServer.Controllers
                     }
                     if(!System.IO.File.Exists(connectionString.MacaroonFilePath))
                     {
-                        ModelState.AddModelError(nameof(vm.ConnectionString), "The macaroonfilepath file does exist");
+                        ModelState.AddModelError(nameof(vm.ConnectionString), "The macaroonfilepath file does not exist");
                         return View(vm);
                     }
                     if(!System.IO.Path.IsPathRooted(connectionString.MacaroonFilePath))
@@ -154,7 +155,7 @@ namespace BTCPayServer.Controllers
                     var handler = (LightningLikePaymentHandler)_ServiceProvider.GetRequiredService<IPaymentMethodHandler<Payments.Lightning.LightningSupportedPaymentMethod>>();
                     try
                     {
-                        var info = await handler.Test(paymentMethod, network);
+                        var info = await handler.GetNodeInfo(paymentMethod, network);
                         if (!vm.SkipPortTest)
                         {
                             using (CancellationTokenSource cts = new CancellationTokenSource(TimeSpan.FromSeconds(20)))
