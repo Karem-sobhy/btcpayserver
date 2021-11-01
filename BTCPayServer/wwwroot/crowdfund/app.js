@@ -1,34 +1,21 @@
 var app = null;
 var eventAggregator = new Vue();
 
-function addLoadEvent(func) {
-    var oldonload = window.onload;
-    if (typeof window.onload != 'function') {
-        window.onload = func;
-    } else {
-        window.onload = function() {
-            if (oldonload) {
-                oldonload();
-            }
-            func();
-        }
-    }
-}
-addLoadEvent(function (ev) {
+document.addEventListener("DOMContentLoaded",function (ev) {
     Vue.use(Toasted);
 
     Vue.component('contribute', {
-        props: ["targetCurrency", "active", "perks", "inModal", "displayPerksRanking", "loading"],
+        props: ["targetCurrency", "active", "perks", "inModal", "displayPerksRanking", "perksValue", "loading"],
         template: "#contribute-template"
     });
 
     Vue.component('perks', {
-        props: ["perks", "targetCurrency", "active", "inModal","displayPerksRanking", "loading"],
+        props: ["perks", "targetCurrency", "active", "inModal","displayPerksRanking", "perksValue", "loading"],
         template: "#perks-template"
     });
 
     Vue.component('perk', {
-        props: ["perk", "targetCurrency", "active", "inModal", "displayPerksRanking", "index", "loading"],
+        props: ["perk", "targetCurrency", "active", "inModal", "displayPerksRanking", "perksValue", "index", "loading"],
         template: "#perk-template",
         data: function () {
             return {
@@ -38,7 +25,7 @@ addLoadEvent(function (ev) {
         },
         computed: {
             canExpand: function(){
-                return !this.expanded && this.active && (this.perk.price.value || this.perk.custom)
+                return !this.expanded && this.active && (this.perk.price.type !== 2 || this.perk.price.value) && (this.perk.inventory==null || this.perk.inventory > 0)
             }
         },
         methods: {
@@ -58,7 +45,7 @@ addLoadEvent(function (ev) {
                 }
             },
             setAmount: function (amount) {
-                this.amount = (amount || 0).noExponents();
+                this.amount = this.perk.price.type === 0? null : (amount || 0).noExponents();
                 this.expanded = false;
             }
 
@@ -69,7 +56,9 @@ addLoadEvent(function (ev) {
         },
         watch: {
             perk: function (newValue, oldValue) {
-                if (newValue.price.value != oldValue.price.value) {
+                if(newValue.price.type ===0){
+                    this.setAmount();
+                }else if (newValue.price.value != oldValue.price.value) {
                     this.setAmount(newValue.price.value);
                 }
             }
@@ -85,8 +74,6 @@ addLoadEvent(function (ev) {
                 connectionStatus: "",
                 endDate: "",
                 startDate: "",
-                startDateRelativeTime: "",
-                endDateRelativeTime: "",
                 started: false,
                 ended: false,
                 contributeModalOpen: false,
@@ -111,11 +98,8 @@ addLoadEvent(function (ev) {
                 return this.srvModel.targetCurrency.toUpperCase();
             },
             paymentStats: function(){
-                var result= [];
-                
+                var result= [];                
                 var combinedStats = {};
-                
-                
                 var keys = Object.keys(this.srvModel.info.paymentStats);
 
                 for (var i = 0; i < keys.length; i++) {
@@ -137,20 +121,24 @@ addLoadEvent(function (ev) {
                 }
 
                 keys = Object.keys(combinedStats);
-
+        
                 for (var i = 0; i < keys.length; i++) {
-                    var newItem = {key:keys[i], value: combinedStats[keys[i]], label: keys[i].replace("_","")};
-                    result.push(newItem);
-                    
-                }
-                for (var i = 0; i < result.length; i++) {
-                    var current = result[i];
-                    if(current.label.endsWith("LightningLike")){
-                        current.label = current.label.substr(0,current.label.indexOf("LightningLike"));
-                        current.lightning = true;
+                    if(!combinedStats[keys[i]]){
+                        continue;
                     }
+                    var paymentMethodId = keys[i].split("_");
+                    var value = combinedStats[keys[i]].toFixed(this.srvModel.currencyDataPayments[paymentMethodId[0]].divisibility);
+                    var newItem = {key:keys[i], value: value, label: paymentMethodId[0]};
+                                                       
+                    if(paymentMethodId.length > 1 && paymentMethodId[1].endsWith("LightningLike")){
+                        newItem.lightning = true;   
+                    }
+                    result.push(newItem);                    
+                }   
+                
+                if(result.length === 1 && result[0].label === srvModel.targetCurrency){
+                    return [];
                 }
-                    
                 return result;
             },
             perks: function(){
@@ -159,6 +147,9 @@ addLoadEvent(function (ev) {
                     var currentPerk = this.srvModel.perks[i];
                     if(this.srvModel.perkCount.hasOwnProperty(currentPerk.id)){
                         currentPerk.sold = this.srvModel.perkCount[currentPerk.id];
+                    }
+                    if(this.srvModel.perkValue.hasOwnProperty(currentPerk.id)){
+                        currentPerk.value = this.srvModel.perkValue[currentPerk.id];
                     }
                     result.push(currentPerk);
                 }
@@ -170,34 +161,38 @@ addLoadEvent(function (ev) {
                 if (this.srvModel.endDate) {
                     var endDateM = moment(this.srvModel.endDate);
                     this.endDate = endDateM.format('MMMM Do YYYY');
-                    this.endDateRelativeTime = endDateM.fromNow();
                     this.ended = endDateM.isBefore(moment());
                     
                 }else{
                     this.ended = false;
+                    this.endDate = null;
                 }
 
                 if (this.srvModel.startDate) {
                     var startDateM = moment(this.srvModel.startDate);
                     this.startDate = startDateM.format('MMMM Do YYYY');
-                    this.startDateRelativeTime = startDateM.fromNow();
                     this.started = startDateM.isBefore(moment());
                 }else{
                     this.started = true;
+                    this.startDate = null;
                 }
                 if(this.started && !this.ended && this.srvModel.endDate){
                     var mDiffD =  moment(this.srvModel.endDate).diff(moment(), "days");
                     var mDiffH =  moment(this.srvModel.endDate).diff(moment(), "hours");
                     var mDiffM =  moment(this.srvModel.endDate).diff(moment(), "minutes");
                     var mDiffS =  moment(this.srvModel.endDate).diff(moment(), "seconds");
-                    this.endDiff =  mDiffD > 0? mDiffD + " Days" : mDiffH> 0? mDiffH + " Hours" : mDiffM> 0? mDiffM+ " Minutes" : mDiffS> 0? mDiffS + " Seconds": ""; 
+                    this.endDiff =  mDiffD > 0? mDiffD + " days" : mDiffH> 0? mDiffH + " hours" : mDiffM> 0? mDiffM+ " minutes" : mDiffS> 0? mDiffS + " seconds": "";
+                }else{
+                    this.endDiff = null;
                 }
                 if(!this.started && this.srvModel.startDate){
                     var mDiffD =  moment(this.srvModel.startDate).diff(moment(), "days");
                     var mDiffH =  moment(this.srvModel.startDate).diff(moment(), "hours");
                     var mDiffM =  moment(this.srvModel.startDate).diff(moment(), "minutes");
                     var mDiffS =  moment(this.srvModel.startDate).diff(moment(), "seconds");
-                    this.startDiff =  mDiffD > 0? mDiffD + " Days" : mDiffH> 0? mDiffH + " Hours" : mDiffM> 0? mDiffM+ " Minutes" : mDiffS> 0? mDiffS + " Seconds": "";
+                    this.startDiff =  mDiffD > 0? mDiffD + " days" : mDiffH> 0? mDiffH + " hours" : mDiffM> 0? mDiffM+ " minutes" : mDiffS> 0? mDiffS + " seconds": "";
+                }else {
+                    this.startDiff = null;
                 }
                 this.lastUpdated = moment(this.srvModel.info.lastUpdated).calendar();
                 this.active = this.started && !this.ended;
@@ -216,7 +211,6 @@ addLoadEvent(function (ev) {
             this.sound = this.srvModel.soundsEnabled;
             this.animation = this.srvModel.animationsEnabled;
             eventAggregator.$on("invoice-created", function (invoiceId) {
-                btcpay.setApiUrlPrefix(window.location.origin);
                 btcpay.showInvoice(invoiceId);
                 btcpay.showFrame();
 
@@ -254,9 +248,9 @@ addLoadEvent(function (ev) {
                 } );
             });
             eventAggregator.$on("payment-received", function (amount, cryptoCode, type) {
-                var onChain = type.toLowerCase() === "btclike";
+                var onChain = type.toLowerCase() !== "lightninglike";
                 if(self.sound) {
-                    playRandomQuakeSound();
+                    playRandomSound();
                 }
                 if(self.animation) {
                     fireworks();

@@ -1,5 +1,4 @@
-﻿using System;
-using Microsoft.Extensions.Logging;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
@@ -8,7 +7,8 @@ using System.Threading.Tasks;
 using BTCPayServer.Logging;
 using BTCPayServer.Services;
 using Microsoft.Extensions.Hosting;
-using NicolasDorier.RateLimits;
+using Microsoft.Extensions.Logging;
+using NBitcoin;
 
 namespace BTCPayServer.HostedServices
 {
@@ -34,6 +34,8 @@ namespace BTCPayServer.HostedServices
 
         public async Task StopAsync(CancellationToken cancellationToken)
         {
+            if (_Stop == null)
+                return;
             _Stop.Cancel();
             try
             {
@@ -43,7 +45,14 @@ namespace BTCPayServer.HostedServices
             {
 
             }
-            await BackgroundJobClient.WaitAllRunning(cancellationToken);
+            try
+            {
+                await BackgroundJobClient.WaitAllRunning(cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+
+            }
         }
     }
 
@@ -51,10 +60,10 @@ namespace BTCPayServer.HostedServices
     {
         class BackgroundJob
         {
-            public Func<Task> Action;
+            public Func<CancellationToken, Task> Action;
             public TimeSpan Delay;
             public IDelay DelayImplementation;
-            public BackgroundJob(Func<Task> action, TimeSpan delay, IDelay delayImplementation)
+            public BackgroundJob(Func<CancellationToken, Task> action, TimeSpan delay, IDelay delayImplementation)
             {
                 this.Action = action;
                 this.Delay = delay;
@@ -64,7 +73,7 @@ namespace BTCPayServer.HostedServices
             public async Task Run(CancellationToken cancellationToken)
             {
                 await DelayImplementation.Wait(Delay, cancellationToken);
-                await Action();
+                await Action(cancellationToken);
             }
         }
 
@@ -73,15 +82,15 @@ namespace BTCPayServer.HostedServices
         {
             lock (_Processing)
             {
-                return _Processing.Count();
+                return _Processing.Count;
             }
         }
 
-        private Channel<BackgroundJob> _Jobs = Channel.CreateUnbounded<BackgroundJob>();
-        HashSet<Task> _Processing = new HashSet<Task>();
-        public void Schedule(Func<Task> action, TimeSpan delay)
+        private readonly Channel<BackgroundJob> _Jobs = Channel.CreateUnbounded<BackgroundJob>();
+        readonly HashSet<Task> _Processing = new HashSet<Task>();
+        public void Schedule(Func<CancellationToken, Task> act, TimeSpan scheduledIn)
         {
-            _Jobs.Writer.TryWrite(new BackgroundJob(action, delay, Delay));
+            _Jobs.Writer.TryWrite(new BackgroundJob(act, scheduledIn, Delay));
         }
 
         public async Task WaitAllRunning(CancellationToken cancellationToken)
@@ -89,6 +98,8 @@ namespace BTCPayServer.HostedServices
             Task[] processing = null;
             lock (_Processing)
             {
+                if (_Processing.Count == 0)
+                    return;
                 processing = _Processing.ToArray();
             }
 
@@ -96,9 +107,8 @@ namespace BTCPayServer.HostedServices
             {
                 await Task.WhenAll(processing).WithCancellation(cancellationToken);
             }
-            catch (Exception) when (cancellationToken.IsCancellationRequested)
+            catch (Exception) when (!cancellationToken.IsCancellationRequested)
             {
-                throw;
             }
         }
 
@@ -113,8 +123,7 @@ namespace BTCPayServer.HostedServices
                     {
                         _Processing.Add(processing);
                     }
-#pragma warning disable CS4014 // Because this call is not awaited, execution of the current method continues before the call is completed
-                    processing.ContinueWith(t =>
+                    _ = processing.ContinueWith(t =>
                     {
                         if (t.IsFaulted)
                         {
@@ -125,7 +134,6 @@ namespace BTCPayServer.HostedServices
                             _Processing.Remove(processing);
                         }
                     }, default, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
-#pragma warning restore CS4014 // Because this call is not awaited, execution of the current method continues before the call is completed
                 }
             }
         }

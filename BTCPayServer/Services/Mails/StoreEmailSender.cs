@@ -1,7 +1,6 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
+using System;
 using System.Threading.Tasks;
+using BTCPayServer.Data;
 using BTCPayServer.Services.Stores;
 
 namespace BTCPayServer.Services.Mails
@@ -13,11 +12,9 @@ namespace BTCPayServer.Services.Mails
                                 IBackgroundJobClient backgroundJobClient,
                                 string storeId) : base(backgroundJobClient)
         {
-            if (storeId == null)
-                throw new ArgumentNullException(nameof(storeId));
+            StoreId = storeId ?? throw new ArgumentNullException(nameof(storeId));
             StoreRepository = storeRepository;
             FallbackSender = fallback;
-            StoreId = storeId;
         }
 
         public StoreRepository StoreRepository { get; }
@@ -32,7 +29,9 @@ namespace BTCPayServer.Services.Mails
             {
                 return emailSettings;
             }
-            return await FallbackSender.GetEmailSettings();
+
+            if (FallbackSender != null) return await FallbackSender?.GetEmailSettings();
+            return null;
         }
     }
 }

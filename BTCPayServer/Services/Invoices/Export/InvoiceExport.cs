@@ -1,11 +1,10 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
-using System.Threading.Tasks;
-using BTCPayServer.Payments.Bitcoin;
-using BTCPayServer.Services.Invoices;
 using BTCPayServer.Services.Rates;
+using CsvHelper.Configuration;
 using Newtonsoft.Json;
 
 namespace BTCPayServer.Services.Invoices.Export
@@ -15,9 +14,8 @@ namespace BTCPayServer.Services.Invoices.Export
         public BTCPayNetworkProvider Networks { get; }
         public CurrencyNameTable Currencies { get; }
 
-        public InvoiceExport(BTCPayNetworkProvider networks, CurrencyNameTable currencies)
+        public InvoiceExport(CurrencyNameTable currencies)
         {
-            Networks = networks;
             Currencies = currencies;
         }
         public string Process(InvoiceEntity[] invoices, string fileFormat)
@@ -46,30 +44,29 @@ namespace BTCPayServer.Services.Invoices.Export
 
         private string processCsv(List<ExportInvoiceHolder> invoices)
         {
-            var serializer = new CsvSerializer<ExportInvoiceHolder>();
-            var csv = serializer.Serialize(invoices);
-
-            return csv;
+            using StringWriter writer = new StringWriter();
+            using var csvWriter = new CsvHelper.CsvWriter(writer, new CsvConfiguration(CultureInfo.InvariantCulture), true);
+            csvWriter.WriteHeader<ExportInvoiceHolder>();
+            csvWriter.NextRecord();
+            csvWriter.WriteRecords(invoices);
+            csvWriter.Flush();
+            return writer.ToString();
         }
 
         private IEnumerable<ExportInvoiceHolder> convertFromDb(InvoiceEntity invoice)
         {
             var exportList = new List<ExportInvoiceHolder>();
-            var currency = Currencies.GetNumberFormatInfo(invoice.ProductInformation.Currency, true);
-
-            var invoiceDue = invoice.ProductInformation.Price;
+            var currency = Currencies.GetNumberFormatInfo(invoice.Currency, true);
+            var invoiceDue = invoice.Price;
             // in this first version we are only exporting invoices that were paid
-            foreach (var payment in invoice.GetPayments())
+            foreach (var payment in invoice.GetPayments(true))
             {
-                // not accounted payments are payments which got double spent like RBfed
-                if (!payment.Accounted)
-                    continue;
                 var cryptoCode = payment.GetPaymentMethodId().CryptoCode;
                 var pdata = payment.GetCryptoPaymentData();
 
-                var pmethod = invoice.GetPaymentMethod(payment.GetPaymentMethodId(), Networks);
+                var pmethod = invoice.GetPaymentMethod(payment.GetPaymentMethodId());
                 var paidAfterNetworkFees = pdata.GetValue() - payment.NetworkFee;
-                invoiceDue -=  paidAfterNetworkFees * pmethod.Rate;
+                invoiceDue -= paidAfterNetworkFees * pmethod.Rate;
 
                 var target = new ExportInvoiceHolder
                 {
@@ -77,8 +74,8 @@ namespace BTCPayServer.Services.Invoices.Export
                     PaymentId = pdata.GetPaymentId(),
                     CryptoCode = cryptoCode,
                     ConversionRate = pmethod.Rate,
-                    PaymentType = payment.GetPaymentMethodId().PaymentType == Payments.PaymentTypes.BTCLike ? "OnChain" : "OffChain",
-                    Destination = payment.GetCryptoPaymentData().GetDestination(Networks.GetNetwork(cryptoCode)),
+                    PaymentType = payment.GetPaymentMethodId().PaymentType.ToPrettyString(),
+                    Destination = pdata.GetDestination(),
                     Paid = pdata.GetValue().ToString(CultureInfo.InvariantCulture),
                     PaidCurrency = Math.Round(pdata.GetValue() * pmethod.Rate, currency.NumberDecimalDigits).ToString(CultureInfo.InvariantCulture),
                     // Adding NetworkFee because Paid doesn't take into account network fees
@@ -87,7 +84,7 @@ namespace BTCPayServer.Services.Invoices.Export
                     // while looking just at export you could sum Paid and assume merchant "received payments"
                     NetworkFee = payment.NetworkFee.ToString(CultureInfo.InvariantCulture),
                     InvoiceDue = Math.Round(invoiceDue, currency.NumberDecimalDigits),
-                    OrderId = invoice.OrderId,
+                    OrderId = invoice.Metadata.OrderId ?? string.Empty,
                     StoreId = invoice.StoreId,
                     InvoiceId = invoice.Id,
                     InvoiceCreatedDate = invoice.InvoiceTime.UtcDateTime,
@@ -98,10 +95,11 @@ namespace BTCPayServer.Services.Invoices.Export
                     InvoiceStatus = invoice.StatusString,
                     InvoiceExceptionStatus = invoice.ExceptionStatusString,
 #pragma warning restore CS0618 // Type or member is obsolete
-                    InvoiceItemCode = invoice.ProductInformation.ItemCode,
-                    InvoiceItemDesc = invoice.ProductInformation.ItemDesc,
-                    InvoicePrice = invoice.ProductInformation.Price,
-                    InvoiceCurrency = invoice.ProductInformation.Currency,
+                    InvoiceItemCode = invoice.Metadata.ItemCode,
+                    InvoiceItemDesc = invoice.Metadata.ItemDesc,
+                    InvoicePrice = invoice.Price,
+                    InvoiceCurrency = invoice.Currency,
+                    BuyerEmail = invoice.Metadata.BuyerEmail
                 };
 
                 exportList.Add(target);
@@ -139,5 +137,6 @@ namespace BTCPayServer.Services.Invoices.Export
         public string InvoiceFullStatus { get; set; }
         public string InvoiceStatus { get; set; }
         public string InvoiceExceptionStatus { get; set; }
+        public string BuyerEmail { get; set; }
     }
 }

@@ -18,13 +18,17 @@ function Cart() {
 
     this.listItems();
     this.bindEmptyCart();
-    
+
     this.updateItemsCount();
     this.updateAmount();
     this.updatePosData();
 }
 
 Cart.prototype.setCustomAmount = function(amount) {
+    if (!srvModel.showCustomAmount) {
+        return 0;
+    }
+
     this.customAmount = this.toNumber(amount);
 
     if (this.customAmount > 0) {
@@ -36,10 +40,18 @@ Cart.prototype.setCustomAmount = function(amount) {
 }
 
 Cart.prototype.getCustomAmount = function() {
+    if (!srvModel.showCustomAmount) {
+        return 0;
+    }
+
     return this.toCents(this.customAmount);
 }
 
 Cart.prototype.setTip = function(amount) {
+    if (!srvModel.enableTips) {
+        return 0;
+    }
+
     this.tip = this.toNumber(amount);
 
     if (this.tip > 0) {
@@ -51,10 +63,18 @@ Cart.prototype.setTip = function(amount) {
 }
 
 Cart.prototype.getTip = function() {
+    if (!srvModel.enableTips) {
+        return 0;
+    }
+
     return this.toCents(this.tip);
 }
 
 Cart.prototype.setDiscount = function(amount) {
+    if (!srvModel.showDiscount) {
+        return 0;
+    }
+
     this.discount = this.toNumber(amount);
 
     if (this.discount > 0) {
@@ -66,10 +86,18 @@ Cart.prototype.setDiscount = function(amount) {
 }
 
 Cart.prototype.getDiscount = function() {
+    if (!srvModel.showDiscount) {
+        return 0;
+    }
+
     return this.toCents(this.discount);
 }
 
 Cart.prototype.getDiscountAmount = function(amount) {
+    if (!srvModel.showDiscount) {
+        return 0;
+    }
+
     return this.percentage(amount, this.getDiscount());
 }
 
@@ -80,11 +108,11 @@ Cart.prototype.getTotalProducts = function() {
     // Always calculate the total amount based on the cart content
     for (var key in this.content) {
         if (
-            this.content.hasOwnProperty(key) && 
-            typeof this.content[key] != 'undefined' && 
+            this.content.hasOwnProperty(key) &&
+            typeof this.content[key] != 'undefined' &&
             !this.content[key].disabled
         ) {
-            var price = this.toCents(this.content[key].price.value);
+            const price = this.toCents(this.content[key].price.value ||0);
             amount += (this.content[key].count * price);
         }
     }
@@ -122,7 +150,7 @@ Cart.prototype.addItem = function(item) {
 
     // Add new item because it doesn't exist yet
     if (!result.length) {
-        this.content.push({id: id, title: item.title, price: item.price, count: 0, image: item.image});
+        this.content.push({id: id, title: item.title, price: item.price, count: 0, image: item.image, inventory: item.inventory});
         this.emptyCartToggle();
     }
 
@@ -131,21 +159,30 @@ Cart.prototype.addItem = function(item) {
 }
 
 Cart.prototype.incrementItem = function(id) {
-    var self = this;
+    var oldItemsCount = this.items;
     this.items = 0; // Calculate total # of items from scratch just to make sure
-
-    this.content.filter(function(obj){
-        // Increment the item count
+    var result = true;
+    for (var i = 0; i < this.content.length; i++) {
+        var obj = this.content[i];
         if (obj.id === id){
+            if(obj.inventory != null && obj.inventory <= obj.count){
+                result = false;
+                continue;
+            }
+
             obj.count++;
             delete(obj.disabled);
         }
 
         // Increment the total # of items
-        self.items += obj.count;
-    });
+        this.items += obj.count;
+    }
+    if(!result){
+        this.items = oldItemsCount;
+    }
 
     this.updateAll();
+    return result;
 }
 
 // Disable cart item so it doesn't count towards total amount
@@ -202,13 +239,13 @@ Cart.prototype.decrementItem = function(id) {
 Cart.prototype.removeItemAll = function(id) {
     var self = this;
     this.items = 0;
-    
+
     // Remove by item
     if (typeof id != 'undefined') {
         this.content.filter(function(obj, index, arr){
             if (obj.id === id) {
                 self.removeItem(id, index, arr);
-    
+
                 for (var i = 0; i < obj.count; i++) {
                     self.items--;
                 }
@@ -227,7 +264,7 @@ Cart.prototype.removeItemAll = function(id) {
 
 Cart.prototype.removeItem = function(id, index, arr) {
     // Remove from the array
-    arr.splice(index, 1); 
+    arr.splice(index, 1);
     // Remove from the DOM
     this.$list.find('tr').eq(index+1).remove();
 }
@@ -349,7 +386,7 @@ Cart.prototype.template = function($template, obj) {
 
 // Build the cart skeleton
 Cart.prototype.buildUI = function() {
-    var $table = $('#js-cart-extra').find('tbody'),
+    var $table = $('#js-cart-extra').find('thead'),
         list = [];
 
     tableTemplate = this.template($('#template-cart-extra'), {
@@ -383,12 +420,16 @@ Cart.prototype.listItems = function() {
         self = this,
         list = [],
         tableTemplate = '';
-    
+
     if (this.content.length > 0) {
         // Prepare the list of items in the cart
         for (var key in this.content) {
             var item = this.content[key],
-                image = this.escape(item.image);
+                image = item.image && this.escape(item.image);
+            
+            if (image && image.startsWith("~")) {
+                image = image.replace('~', window.location.pathname.substring(0, image.indexOf('/apps')));
+            }
 
             tableTemplate = this.template($('#template-cart-item'), {
                 'id': this.escape(item.id),
@@ -397,7 +438,8 @@ Cart.prototype.listItems = function() {
                 }) : '',
                 'title': this.escape(item.title),
                 'count': this.escape(item.count),
-                'price': this.escape(item.price.formatted)
+                'inventory': this.escape(item.inventory < 0? 99999: item.inventory),
+                'price': this.escape(item.price.formatted || 0)
             });
             list.push($(tableTemplate));
         }
@@ -415,7 +457,7 @@ Cart.prototype.listItems = function() {
                 prevQty = parseInt($(this).data('prev')),
                 qtyDiff = Math.abs(qty - prevQty),
                 qtyIncreased = qty > prevQty;
-            
+
             if (isQty) {
                 $(this).data('prev', qty);
             } else {
@@ -437,7 +479,7 @@ Cart.prototype.listItems = function() {
                         id: id,
                         title: item.title,
                         price: item.price,
-                        image: typeof item.image != 'underfined' ? item.image : null
+                        image: item.image
                     });
                 }
             } else if (!qtyIncreased) { // Quantity decreased
@@ -471,14 +513,14 @@ Cart.prototype.listItems = function() {
         // Increment item
         $('.js-cart-item-plus').off().on('click', function(event){
             event.preventDefault();
+            if(self.incrementItem($(this).closest('tr').data('id'))){
+                var $val = $(this).parents('.input-group').find('.js-cart-item-count'),
+                    val = parseInt($val.val() || $val.data('prev')) + 1;
 
-            var $val = $(this).parents('.input-group').find('.js-cart-item-count'),
-                val = parseInt($val.val() || $val.data('prev')) + 1;
-            
-            $val.val(val);
-            $val.data('prev', val);
-            self.resetTip();
-            self.incrementItem($(this).closest('tr').data('id'));
+                $val.val(val);
+                $val.data('prev', val);
+                self.resetTip();
+            }
         });
 
         // Decrement item
@@ -587,8 +629,8 @@ Cart.prototype.percentage = function(amount, percentage) {
 /*
 * Storage
 */
-Cart.prototype.getStorageKey = function (name) { 
-    return (name + srvModel.appId + srvModel.currencyCode); 
+Cart.prototype.getStorageKey = function (name) {
+    return (name + srvModel.appId + srvModel.currencyCode);
 }
 
 Cart.prototype.saveLocalStorage = function() {
@@ -597,15 +639,39 @@ Cart.prototype.saveLocalStorage = function() {
 
 Cart.prototype.loadLocalStorage = function() {
     this.content = $.parseJSON(localStorage.getItem(this.getStorageKey('cart'))) || [];
+    var self = this;
 
     // Get number of cart items
-    for (var key in this.content) {
-        if (this.content.hasOwnProperty(key) && typeof this.content[key] != 'undefined' && this.content[key] != null) {
-            this.items += this.content[key].count;
-
-            // Delete the disabled flag if any
-            delete(this.content[key].disabled);
+    for (var i = this.content.length-1; i >= 0; i--) {
+        if (!this.content[i]) {
+            this.content.splice(i,1);
+            continue;
         }
+
+        //check if the pos items still has the cached cart items
+        var matchedItem = srvModel.items.find(function(item){
+            return item.id === self.content[i].id;
+        });
+        if(!matchedItem){
+            //remove if no longer available
+            this.content.splice(i,1);
+            continue;
+        }else{
+
+            if(matchedItem.inventory != null && matchedItem.inventory <= 0){
+                //item is out of stock
+                this.content.splice(i,1);
+            }else if(matchedItem.inventory != null && matchedItem.inventory <  this.content[i].count){
+                //not enough stock for original cart amount, reduce to available stock
+                this.content[i].count = matchedItem.inventory;
+            }
+            //update its stock
+            this.content[i].inventory = matchedItem.inventory;
+
+        }
+        this.items += this.content[i].count;
+            // Delete the disabled flag if any
+            delete(this.content[i].disabled);
     }
 
     this.discount = localStorage.getItem(this.getStorageKey('cartDiscount'));
@@ -668,7 +734,7 @@ $.fn.inputAmount = function(obj, type) {
 $.fn.removeAmount = function(obj, type) {
     $(this).off().on('click', function(event){
         event.preventDefault();
-    
+
         switch (type) {
             case 'customAmount':
                 obj.resetCustomAmount();
@@ -683,6 +749,6 @@ $.fn.removeAmount = function(obj, type) {
         obj.resetTip();
         obj.updateTotal();
         obj.updateSummaryTotal();
-        obj.emptyCartToggle();  
+        obj.emptyCartToggle();
     });
 }

@@ -1,18 +1,19 @@
-﻿using System;
+using System;
 using System.Linq;
 using System.Threading.Tasks;
 using BTCPayServer.Data;
+using BTCPayServer.Filters;
 using BTCPayServer.Lightning;
-using BTCPayServer.Models.StoreViewModels;
+using BTCPayServer.Logging;
 using BTCPayServer.Payments;
 using BTCPayServer.Payments.Lightning;
 using BTCPayServer.Services.Stores;
-using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
 
 namespace BTCPayServer.Controllers
 {
-    
+
     [Route("embed/{storeId}/{cryptoCode}/ln")]
     [AllowAnonymous]
     public class PublicLightningNodeInfoController : Controller
@@ -21,15 +22,16 @@ namespace BTCPayServer.Controllers
         private readonly LightningLikePaymentHandler _LightningLikePaymentHandler;
         private readonly StoreRepository _StoreRepository;
 
-        public PublicLightningNodeInfoController(BTCPayNetworkProvider btcPayNetworkProvider, 
+        public PublicLightningNodeInfoController(BTCPayNetworkProvider btcPayNetworkProvider,
             LightningLikePaymentHandler lightningLikePaymentHandler, StoreRepository storeRepository)
         {
             _BtcPayNetworkProvider = btcPayNetworkProvider;
             _LightningLikePaymentHandler = lightningLikePaymentHandler;
             _StoreRepository = storeRepository;
         }
-        
+
         [HttpGet]
+        [XFrameOptions(XFrameOptionsAttribute.XFrameOptions.AllowAll)]
         public async Task<IActionResult> ShowLightningNodeInfo(string storeId, string cryptoCode)
         {
             var store = await _StoreRepository.FindStore(storeId);
@@ -39,25 +41,30 @@ namespace BTCPayServer.Controllers
             try
             {
                 var paymentMethodDetails = GetExistingLightningSupportedPaymentMethod(cryptoCode, store);
-                var network = _BtcPayNetworkProvider.GetNetwork(cryptoCode);
+                var network = _BtcPayNetworkProvider.GetNetwork<BTCPayNetwork>(cryptoCode);
                 var nodeInfo =
-                    await _LightningLikePaymentHandler.GetNodeInfo(paymentMethodDetails,
-                        network);
+                    await _LightningLikePaymentHandler.GetNodeInfo(paymentMethodDetails, network, new InvoiceLogs());
 
-                return View(new ShowLightningNodeInfoViewModel()
+                return View(new ShowLightningNodeInfoViewModel
                 {
                     Available = true,
-                    NodeInfo = nodeInfo.ToString(),
+                    NodeInfo = nodeInfo.Select(n => new ShowLightningNodeInfoViewModel.NodeData(n)).ToArray(),
                     CryptoCode = cryptoCode,
-                    CryptoImage = GetImage(paymentMethodDetails.PaymentId, network)
+                    CryptoImage = GetImage(paymentMethodDetails.PaymentId, network),
+                    StoreName = store.StoreName
                 });
             }
             catch (Exception)
             {
-                return View(new ShowLightningNodeInfoViewModel() {Available = false, CryptoCode = cryptoCode});
+                return View(new ShowLightningNodeInfoViewModel
+                {
+                    Available = false, 
+                    CryptoCode = cryptoCode,
+                    StoreName = store.StoreName
+                });
             }
         }
-        
+
         private LightningSupportedPaymentMethod GetExistingLightningSupportedPaymentMethod(string cryptoCode, StoreData store)
         {
             var id = new PaymentMethodId(cryptoCode, PaymentTypes.LightningLike);
@@ -77,11 +84,29 @@ namespace BTCPayServer.Controllers
         }
     }
 
+
     public class ShowLightningNodeInfoViewModel
     {
-        public string NodeInfo { get; set; }
+        public class NodeData
+        {
+            string _connection;
+            public NodeData(NodeInfo nodeInfo)
+            {
+                _connection = nodeInfo.ToString();
+                Id = $"{nodeInfo.Host}-{nodeInfo.Port}".Replace(".", "-", StringComparison.OrdinalIgnoreCase);
+                IsTor = nodeInfo.IsTor;
+            }
+            public string Id { get; }
+            public bool IsTor { get; }
+            public override string ToString()
+            {
+                return _connection;
+            }
+        }
+        public NodeData[] NodeInfo { get; set; }
         public bool Available { get; set; }
         public string CryptoCode { get; set; }
         public string CryptoImage { get; set; }
+        public string StoreName { get; set; }
     }
 }

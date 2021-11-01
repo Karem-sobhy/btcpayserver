@@ -1,35 +1,20 @@
-﻿using BTCPayServer.Logging;
+using System;
+using BTCPayServer.Configuration;
+using System.IO;
 using System.Linq;
+using System.Net;
+using BTCPayServer.Logging;
+using BTCPayServer.SSH;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using NBitcoin;
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Net;
-using System.Text;
-using StandardConfiguration;
-using Microsoft.Extensions.Configuration;
-using NBXplorer;
-using BTCPayServer.Payments.Lightning;
-using Renci.SshNet;
-using NBitcoin.DataEncoders;
-using BTCPayServer.SSH;
-using BTCPayServer.Lightning;
-using BTCPayServer.Configuration.External;
 using Serilog.Events;
 
 namespace BTCPayServer.Configuration
 {
-    public class NBXplorerConnectionSetting
-    {
-        public string CryptoCode { get; internal set; }
-        public Uri ExplorerUri { get; internal set; }
-        public string CookieFile { get; internal set; }
-    }
-
     public class BTCPayServerOptions
     {
-        public NetworkType NetworkType
+        public ChainName NetworkType
         {
             get; set;
         }
@@ -44,22 +29,8 @@ namespace BTCPayServer.Configuration
             get;
             private set;
         }
-        public string DataDir
-        {
-            get;
-            private set;
-        }
-        public List<IPEndPoint> Listen
-        {
-            get;
-            set;
-        }
+        public EndPoint SocksEndpoint { get; set; }
 
-        public List<NBXplorerConnectionSetting> NBXplorerConnectionSettings
-        {
-            get;
-            set;
-        } = new List<NBXplorerConnectionSetting>();
 
         public bool DisableRegistration
         {
@@ -69,7 +40,15 @@ namespace BTCPayServer.Configuration
 
         public static string GetDebugLog(IConfiguration configuration)
         {
-            return configuration.GetValue<string>("debuglog", null);
+            var logfile = configuration.GetValue<string>("debuglog", null);
+            if (!string.IsNullOrEmpty(logfile))
+            {
+                if (!Path.IsPathRooted(logfile))
+                {
+                    logfile = Path.Combine(new DataDirectories().Configure(configuration).DataDir, logfile);
+                }
+            }
+            return logfile;
         }
         public static LogEventLevel GetDebugLogLevel(IConfiguration configuration)
         {
@@ -80,117 +59,32 @@ namespace BTCPayServer.Configuration
         public void LoadArgs(IConfiguration conf)
         {
             NetworkType = DefaultConfiguration.GetNetworkType(conf);
-            var defaultSettings = BTCPayDefaultSettings.GetDefaultSettings(NetworkType);
-            DataDir = conf.GetOrDefault<string>("datadir", defaultSettings.DefaultDataDirectory);
+            
             Logs.Configuration.LogInformation("Network: " + NetworkType.ToString());
 
-            var supportedChains = conf.GetOrDefault<string>("chains", "btc")
-                                      .Split(',', StringSplitOptions.RemoveEmptyEntries)
-                                      .Select(t => t.ToUpperInvariant());
-            NetworkProvider = new BTCPayNetworkProvider(NetworkType).Filter(supportedChains.ToArray());
-            foreach (var chain in supportedChains)
-            {
-                if (NetworkProvider.GetNetwork(chain) == null)
-                    throw new ConfigException($"Invalid chains \"{chain}\"");
-            }
+            if (conf.GetOrDefault<bool>("launchsettings", false) && NetworkType != ChainName.Regtest)
+                throw new ConfigException($"You need to run BTCPayServer with the run.sh or run.ps1 script");
 
-            var validChains = new List<string>();
-            foreach (var net in NetworkProvider.GetAll())
-            {
-                NBXplorerConnectionSetting setting = new NBXplorerConnectionSetting();
-                setting.CryptoCode = net.CryptoCode;
-                setting.ExplorerUri = conf.GetOrDefault<Uri>($"{net.CryptoCode}.explorer.url", net.NBXplorerNetwork.DefaultSettings.DefaultUrl);
-                setting.CookieFile = conf.GetOrDefault<string>($"{net.CryptoCode}.explorer.cookiefile", net.NBXplorerNetwork.DefaultSettings.DefaultCookieFile);
-                NBXplorerConnectionSettings.Add(setting);
-
-                {
-                    var lightning = conf.GetOrDefault<string>($"{net.CryptoCode}.lightning", string.Empty);
-                    if (lightning.Length != 0)
-                    {
-                        if (!LightningConnectionString.TryParse(lightning, true, out var connectionString, out var error))
-                        {
-                            throw new ConfigException($"Invalid setting {net.CryptoCode}.lightning, " + Environment.NewLine +
-                                $"If you have a c-lightning server use: 'type=clightning;server=/root/.lightning/lightning-rpc', " + Environment.NewLine +
-                                $"If you have a lightning charge server: 'type=charge;server=https://charge.example.com;api-token=yourapitoken'" + Environment.NewLine +
-                                $"If you have a lnd server: 'type=lnd-rest;server=https://lnd:lnd@lnd.example.com;macaroon=abf239...;certthumbprint=2abdf302...'" + Environment.NewLine +
-                                $"              lnd server: 'type=lnd-rest;server=https://lnd:lnd@lnd.example.com;macaroonfilepath=/root/.lnd/admin.macaroon;certthumbprint=2abdf302...'" + Environment.NewLine +
-                                error);
-                        }
-                        if (connectionString.IsLegacy)
-                        {
-                            Logs.Configuration.LogWarning($"Setting {net.CryptoCode}.lightning is a deprecated format, it will work now, but please replace it for future versions with '{connectionString.ToString()}'");
-                        }
-                        InternalLightningByCryptoCode.Add(net.CryptoCode, connectionString);
-                    }
-                }
-
-                void externalLnd<T>(string code, string lndType)
-                {
-                    var lightning = conf.GetOrDefault<string>(code, string.Empty);
-                    if (lightning.Length != 0)
-                    {
-                        if (!LightningConnectionString.TryParse(lightning, false, out var connectionString, out var error))
-                        {
-                            throw new ConfigException($"Invalid setting {code}, " + Environment.NewLine +
-                                $"lnd server: 'type={lndType};server=https://lnd.example.com;macaroon=abf239...;certthumbprint=2abdf302...'" + Environment.NewLine +
-                                $"lnd server: 'type={lndType};server=https://lnd.example.com;macaroonfilepath=/root/.lnd/admin.macaroon;certthumbprint=2abdf302...'" + Environment.NewLine +
-                                error);
-                        }
-                        var instanceType = typeof(T);
-                        ExternalServicesByCryptoCode.Add(net.CryptoCode, (ExternalService)Activator.CreateInstance(instanceType, connectionString));
-                    }
-                };
-
-                externalLnd<ExternalLndGrpc>($"{net.CryptoCode}.external.lnd.grpc", "lnd-grpc");
-                externalLnd<ExternalLndRest>($"{net.CryptoCode}.external.lnd.rest", "lnd-rest");
-
-                var spark = conf.GetOrDefault<string>($"{net.CryptoCode}.external.spark", string.Empty);
-                if (spark.Length != 0)
-                {
-                    if (!SparkConnectionString.TryParse(spark, out var connectionString))
-                    {
-                        throw new ConfigException($"Invalid setting {net.CryptoCode}.external.spark, " + Environment.NewLine +
-                            $"Valid example: 'server=https://btcpay.example.com/spark/btc/;cookiefile=/etc/clightning_bitcoin_spark/.cookie'");
-                    }
-                    ExternalServicesByCryptoCode.Add(net.CryptoCode, new ExternalSpark(connectionString));
-                }
-
-                var charge = conf.GetOrDefault<string>($"{net.CryptoCode}.external.charge", string.Empty);
-                if (charge.Length != 0)
-                {
-                    if (!LightningConnectionString.TryParse(charge, false, out var chargeConnectionString, out var chargeError))
-                        LightningConnectionString.TryParse("type=charge;" + charge, false, out chargeConnectionString, out chargeError);
-
-                    if(chargeConnectionString == null || chargeConnectionString.ConnectionType != LightningConnectionType.Charge)
-                    {
-                        throw new ConfigException($"Invalid setting {net.CryptoCode}.external.charge, " + Environment.NewLine +
-                                $"lightning charge server: 'type=charge;server=https://charge.example.com;api-token=2abdf302...'" + Environment.NewLine +
-                                $"lightning charge server: 'type=charge;server=https://charge.example.com;cookiefilepath=/root/.charge/.cookie'" + Environment.NewLine +
-                                chargeError ?? string.Empty);
-                    }
-                    ExternalServicesByCryptoCode.Add(net.CryptoCode, new ExternalCharge(chargeConnectionString));
-                }
-            }
-
-            Logs.Configuration.LogInformation("Supported chains: " + String.Join(',', supportedChains.ToArray()));
-
-            var services = conf.GetOrDefault<string>("externalservices", null);
-            if (services != null)
-            {
-                foreach (var service in services.Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries)
-                                                .Select(p => (p, SeparatorIndex: p.IndexOf(':', StringComparison.OrdinalIgnoreCase)))
-                                                .Where(p => p.SeparatorIndex != -1)
-                                                .Select(p => (Name: p.p.Substring(0, p.SeparatorIndex), 
-                                                              Link: p.p.Substring(p.SeparatorIndex + 1))))
-                {
-                    ExternalServices.AddOrReplace(service.Name, service.Link);
-                }
-            }
-
-            PostgresConnectionString = conf.GetOrDefault<string>("postgres", null);
-            MySQLConnectionString = conf.GetOrDefault<string>("mysql", null);
+          
+            
             BundleJsCss = conf.GetOrDefault<bool>("bundlejscss", true);
-            ExternalUrl = conf.GetOrDefault<Uri>("externalurl", null);
+            DockerDeployment = conf.GetOrDefault<bool>("dockerdeployment", true);
+
+            TorrcFile = conf.GetOrDefault<string>("torrcfile", null);
+            TorServices = conf.GetOrDefault<string>("torservices", null)
+                ?.Split(new[] {';', ','}, StringSplitOptions.RemoveEmptyEntries);
+            if (!string.IsNullOrEmpty(TorrcFile) && TorServices != null)
+                throw new ConfigException($"torrcfile or torservices should be provided, but not both");
+
+            var socksEndpointString = conf.GetOrDefault<string>("socksendpoint", null);
+            if (!string.IsNullOrEmpty(socksEndpointString))
+            {
+                if (!Utils.TryParseEndpoint(socksEndpointString, 9050, out var endpoint))
+                    throw new ConfigException("Invalid value for socksendpoint");
+                SocksEndpoint = endpoint;
+            }
+
+            UpdateUrl = conf.GetOrDefault<Uri>("updateurl", null);
 
             var sshSettings = ParseSSHConfiguration(conf);
             if ((!string.IsNullOrEmpty(sshSettings.Password) || !string.IsNullOrEmpty(sshSettings.KeyFile)) && !string.IsNullOrEmpty(sshSettings.Server))
@@ -212,12 +106,16 @@ namespace BTCPayServer.Configuration
                 try
                 {
                     sshSettings.CreateConnectionInfo();
+                    SSHSettings = sshSettings;
+                }
+                catch (NotSupportedException ex)
+                {
+                    Logs.Configuration.LogWarning($"The SSH key is not supported ({ex.Message}), try to generate the key with ssh-keygen using \"-m PEM\". Skipping SSH configuration...");
                 }
                 catch
                 {
                     throw new ConfigException($"sshkeyfilepassword is invalid");
                 }
-                SSHSettings = sshSettings;
             }
 
             var fingerPrints = conf.GetOrDefault<string>("sshtrustedfingerprints", "");
@@ -227,7 +125,7 @@ namespace BTCPayServer.Configuration
                 {
                     if (!SSHFingerprint.TryParse(fingerprint, out var f))
                         throw new ConfigException($"Invalid ssh fingerprint format {fingerprint}");
-                    TrustedFingerprints.Add(f);
+                    SSHSettings?.TrustedFingerprints.Add(f);
                 }
             }
 
@@ -246,11 +144,19 @@ namespace BTCPayServer.Configuration
             }
 
             DisableRegistration = conf.GetOrDefault<bool>("disable-registration", true);
+            PluginRemote = conf.GetOrDefault("plugin-remote", "btcpayserver/btcpayserver-plugins");
+            RecommendedPlugins = conf.GetOrDefault("recommended-plugins", "").ToLowerInvariant().Split('\r','\n','\t',' ').Where(s => !string.IsNullOrEmpty(s)).Distinct().ToArray();
+            CheatMode = conf.GetOrDefault("cheatmode", false);
+            if (CheatMode && this.NetworkType == ChainName.Mainnet)
+                throw new ConfigException($"cheatmode can't be used on mainnet");
         }
+
+        public string PluginRemote { get; set; }
+        public string[] RecommendedPlugins { get; set; }
+        public bool CheatMode { get; set; }
 
         private SSHSettings ParseSSHConfiguration(IConfiguration conf)
         {
-            var externalUrl = conf.GetOrDefault<Uri>("externalurl", null);
             var settings = new SSHSettings();
             settings.Server = conf.GetOrDefault<string>("sshconnection", null);
             if (settings.Server != null)
@@ -277,64 +183,27 @@ namespace BTCPayServer.Configuration
                     settings.Username = "root";
                 }
             }
-            else if (externalUrl != null)
-            {
-                settings.Port = 22;
-                settings.Username = "root";
-                settings.Server = externalUrl.DnsSafeHost;
-            }
             settings.Password = conf.GetOrDefault<string>("sshpassword", "");
             settings.KeyFile = conf.GetOrDefault<string>("sshkeyfile", "");
+            settings.AuthorizedKeysFile = conf.GetOrDefault<string>("sshauthorizedkeys", "");
             settings.KeyFilePassword = conf.GetOrDefault<string>("sshkeyfilepassword", "");
             return settings;
         }
 
-        internal bool IsTrustedFingerprint(byte[] fingerPrint, byte[] hostKey)
-        {
-            return TrustedFingerprints.Any(f => f.Match(fingerPrint, hostKey));
-        }
-
         public string RootPath { get; set; }
-        public Dictionary<string, LightningConnectionString> InternalLightningByCryptoCode { get; set; } = new Dictionary<string, LightningConnectionString>();
-        public Dictionary<string, string> ExternalServices { get; set; } = new Dictionary<string, string>();
-
-        public ExternalServices ExternalServicesByCryptoCode { get; set; } = new ExternalServices();
-
-        public BTCPayNetworkProvider NetworkProvider { get; set; }
-        public string PostgresConnectionString
-        {
-            get;
-            set;
-        }
-        public string MySQLConnectionString
-        {
-            get;
-            set;
-        }
-        public Uri ExternalUrl
-        {
-            get;
-            set;
-        }
+        public bool DockerDeployment { get; set; }
         public bool BundleJsCss
         {
             get;
             set;
         }
-        public List<SSHFingerprint> TrustedFingerprints { get; set; } = new List<SSHFingerprint>();
         public SSHSettings SSHSettings
         {
             get;
             set;
         }
-
-        internal string GetRootUri()
-        {
-            if (ExternalUrl == null)
-                return null;
-            UriBuilder builder = new UriBuilder(ExternalUrl);
-            builder.Path = RootPath;
-            return builder.ToString();
-        }
+        public string TorrcFile { get; set; }
+        public string[] TorServices { get; set; }
+        public Uri UpdateUrl { get; set; }
     }
 }

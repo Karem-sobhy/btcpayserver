@@ -1,12 +1,17 @@
-﻿using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
 
 namespace BTCPayServer.Models.InvoicingModels
 {
+    public class CheckoutUIPaymentMethodSettings
+    {
+        public string ExtensionPartial { get; set; }
+        public string CheckoutBodyVueComponentName { get; set; }
+        public string CheckoutHeaderVueComponentName { get; set; }
+        public string NoScriptPartialName { get; set; }
+    }
     public class PaymentModel
     {
+        public CheckoutUIPaymentMethodSettings UISettings;
         public class AvailableCrypto
         {
             public string PaymentMethodId { get; set; }
@@ -16,24 +21,26 @@ namespace BTCPayServer.Models.InvoicingModels
             public bool IsLightning { get; set; }
             public string CryptoCode { get; set; }
         }
-        public string HtmlTitle { get; set; }
         public string CustomCSSLink { get; set; }
         public string CustomLogoLink { get; set; }
+        public string HtmlTitle { get; set; }
         public string DefaultLang { get; set; }
         public List<AvailableCrypto> AvailableCryptos { get; set; } = new List<AvailableCrypto>();
         public bool IsModal { get; set; }
-        public bool IsLightning { get; set; }
+        public bool IsUnsetTopUp { get; set; }
         public string CryptoCode { get; set; }
         public string InvoiceId { get; set; }
         public string BtcAddress { get; set; }
         public string BtcDue { get; set; }
         public string CustomerEmail { get; set; }
         public bool RequiresRefundEmail { get; set; }
+        public bool ShowRecommendedFee { get; set; }
+        public decimal FeeRate { get; set; }
         public int ExpirationSeconds { get; set; }
         public string Status { get; set; }
         public string MerchantRefLink { get; set; }
         public int MaxTimeSeconds { get; set; }
-        
+
         public string StoreName { get; set; }
         public string ItemDesc { get; set; }
         public string TimeLeft { get; set; }
@@ -43,6 +50,7 @@ namespace BTCPayServer.Models.InvoicingModels
         public string InvoiceBitcoinUrl { get; set; }
         public string InvoiceBitcoinUrlQR { get; set; }
         public int TxCount { get; set; }
+        public int TxCountForFee { get; set; }
         public string BtcPaid { get; set; }
         public string StoreEmail { get; set; }
 
@@ -54,15 +62,11 @@ namespace BTCPayServer.Models.InvoicingModels
         public string PaymentMethodId { get; set; }
         public string PaymentMethodName { get; set; }
         public string CryptoImage { get; set; }
-
-        public bool ChangellyEnabled { get; set; }
         public string StoreId { get; set; }
         public string PeerInfo { get; set; }
-        public string ChangellyMerchantId { get; set; }
-        public decimal? ChangellyAmountDue { get; set; }
-        
-        public bool CoinSwitchEnabled { get; set; }
-        public string CoinSwitchMode { get; set; }
-        public string CoinSwitchMerchantId { get; set; }
+        public string RootPath { get; set; }
+        public bool RedirectAutomatically { get; set; }
+        public bool Activated { get; set; }
+        public string InvoiceCurrency { get; set; }
     }
 }

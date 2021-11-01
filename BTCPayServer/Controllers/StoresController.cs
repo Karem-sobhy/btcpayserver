@@ -1,26 +1,33 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Net.Http;
+using System.Threading;
 using System.Threading.Tasks;
-using BTCPayServer.Authentication;
+using BTCPayServer.Abstractions.Constants;
+using BTCPayServer.Abstractions.Extensions;
+using BTCPayServer.Abstractions.Models;
+using BTCPayServer.Client;
 using BTCPayServer.Configuration;
 using BTCPayServer.Data;
+using BTCPayServer.HostedServices;
 using BTCPayServer.Models;
-using BTCPayServer.Models.AppViewModels;
 using BTCPayServer.Models.StoreViewModels;
 using BTCPayServer.Payments;
-using BTCPayServer.Payments.Changelly;
 using BTCPayServer.Payments.Lightning;
 using BTCPayServer.Rating;
 using BTCPayServer.Security;
+using BTCPayServer.Security.Bitpay;
 using BTCPayServer.Services;
+using BTCPayServer.Services.Apps;
+using BTCPayServer.Services.Invoices;
 using BTCPayServer.Services.Rates;
 using BTCPayServer.Services.Stores;
 using BTCPayServer.Services.Wallets;
+using BundlerMinifier.TagHelpers;
 using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Cors;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
@@ -28,16 +35,19 @@ using Microsoft.AspNetCore.Mvc.Rendering;
 using Microsoft.Extensions.Options;
 using NBitcoin;
 using NBitcoin.DataEncoders;
+using NBXplorer;
+using NBXplorer.DerivationStrategy;
+using StoreData = BTCPayServer.Data.StoreData;
 
 namespace BTCPayServer.Controllers
 {
     [Route("stores")]
-    [Authorize(AuthenticationSchemes = Policies.CookieAuthentication)]
-    [Authorize(Policy = Policies.CanModifyStoreSettings.Key)]
+    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie)]
+    [Authorize(Policy = Policies.CanModifyStoreSettings, AuthenticationSchemes = AuthenticationSchemes.Cookie)]
     [AutoValidateAntiforgeryToken]
     public partial class StoresController : Controller
     {
-        RateFetcher _RateFactory;
+        readonly RateFetcher _RateFactory;
         public string CreatedStoreId { get; set; }
         public StoresController(
             IServiceProvider serviceProvider,
@@ -51,51 +61,56 @@ namespace BTCPayServer.Controllers
             BTCPayNetworkProvider networkProvider,
             RateFetcher rateFactory,
             ExplorerClientProvider explorerProvider,
-            IFeeProviderFactory feeRateProvider,
             LanguageService langService,
-            ChangellyClientProvider changellyClientProvider,
-            IOptions<MvcJsonOptions> mvcJsonOptions,
-            IHostingEnvironment env, IHttpClientFactory httpClientFactory)
+            PaymentMethodHandlerDictionary paymentMethodHandlerDictionary,
+            SettingsRepository settingsRepository,
+            IAuthorizationService authorizationService,
+            EventAggregator eventAggregator,
+            AppService appService,
+            WebhookNotificationManager webhookNotificationManager,
+            IDataProtectionProvider dataProtector,
+            NBXplorerDashboard Dashboard)
         {
             _RateFactory = rateFactory;
             _Repo = repo;
             _TokenRepository = tokenRepo;
             _UserManager = userManager;
             _LangService = langService;
-            _changellyClientProvider = changellyClientProvider;
-            MvcJsonOptions = mvcJsonOptions;
             _TokenController = tokenController;
             _WalletProvider = walletProvider;
-            _Env = env;
-            _httpClientFactory = httpClientFactory;
+            _paymentMethodHandlerDictionary = paymentMethodHandlerDictionary;
+            _settingsRepository = settingsRepository;
+            _authorizationService = authorizationService;
+            _appService = appService;
+            DataProtector = dataProtector.CreateProtector("ConfigProtector");
+            WebhookNotificationManager = webhookNotificationManager;
+            _EventAggregator = eventAggregator;
             _NetworkProvider = networkProvider;
             _ExplorerProvider = explorerProvider;
-            _FeeRateProvider = feeRateProvider;
             _ServiceProvider = serviceProvider;
             _BtcpayServerOptions = btcpayServerOptions;
             _BTCPayEnv = btcpayEnv;
+            _Dashboard = Dashboard;
         }
-        BTCPayServerOptions _BtcpayServerOptions;
-        BTCPayServerEnvironment _BTCPayEnv;
-        IServiceProvider _ServiceProvider;
-        BTCPayNetworkProvider _NetworkProvider;
-        private ExplorerClientProvider _ExplorerProvider;
-        private IFeeProviderFactory _FeeRateProvider;
-        BTCPayWalletProvider _WalletProvider;
-        AccessTokenController _TokenController;
-        StoreRepository _Repo;
-        TokenRepository _TokenRepository;
-        UserManager<ApplicationUser> _UserManager;
-        private LanguageService _LangService;
-        private readonly ChangellyClientProvider _changellyClientProvider;
-        IHostingEnvironment _Env;
-        private IHttpClientFactory _httpClientFactory;
 
-        [TempData]
-        public string StatusMessage
-        {
-            get; set;
-        }
+        readonly BTCPayServerOptions _BtcpayServerOptions;
+        readonly BTCPayServerEnvironment _BTCPayEnv;
+        readonly IServiceProvider _ServiceProvider;
+        readonly BTCPayNetworkProvider _NetworkProvider;
+        private readonly ExplorerClientProvider _ExplorerProvider;
+        readonly BTCPayWalletProvider _WalletProvider;
+        readonly AccessTokenController _TokenController;
+        readonly StoreRepository _Repo;
+        readonly TokenRepository _TokenRepository;
+        readonly UserManager<ApplicationUser> _UserManager;
+        private readonly LanguageService _LangService;
+        private readonly PaymentMethodHandlerDictionary _paymentMethodHandlerDictionary;
+        private readonly SettingsRepository _settingsRepository;
+        private readonly IAuthorizationService _authorizationService;
+        private readonly AppService _appService;
+        private readonly EventAggregator _EventAggregator;
+        private readonly NBXplorerDashboard _Dashboard;
+
         [TempData]
         public bool StoreNotConfigured
         {
@@ -113,8 +128,8 @@ namespace BTCPayServer.Controllers
 
         private async Task FillUsers(StoreUsersViewModel vm)
         {
-            var users = await _Repo.GetStoreUsers(StoreData.Id);
-            vm.StoreId = StoreData.Id;
+            var users = await _Repo.GetStoreUsers(CurrentStore.Id);
+            vm.StoreId = CurrentStore.Id;
             vm.Users = users.Select(u => new StoreUsersViewModel.StoreUserViewModel()
             {
                 Email = u.Email,
@@ -123,12 +138,24 @@ namespace BTCPayServer.Controllers
             }).ToList();
         }
 
-        public StoreData StoreData
+        public StoreData CurrentStore
         {
             get
             {
                 return this.HttpContext.GetStoreData();
             }
+        }
+
+        public bool TaprootActivated(string crytoCode)
+        {
+            var network = (BTCPayNetwork)_NetworkProvider.GetNetwork(crytoCode);
+#pragma warning disable CS0618
+            if (!(network.IsBTC && network.NBitcoinNetwork.ChainName == ChainName.Mainnet))
+                // Consider it activated for everything that is not mainnet bitcoin
+                return true;
+#pragma warning restore CS0618
+            var status = _Dashboard.Get(crytoCode).Status;
+            return  status.ChainHeight >= 709632;
         }
 
 
@@ -152,60 +179,76 @@ namespace BTCPayServer.Controllers
                 ModelState.AddModelError(nameof(vm.Role), "Invalid role");
                 return View(vm);
             }
-            if (!await _Repo.AddStoreUser(StoreData.Id, user.Id, vm.Role))
+            if (!await _Repo.AddStoreUser(CurrentStore.Id, user.Id, vm.Role))
             {
                 ModelState.AddModelError(nameof(vm.Email), "The user already has access to this store");
                 return View(vm);
             }
-            StatusMessage = "User added successfully";
+            TempData[WellKnownTempData.SuccessMessage] = "User added successfully.";
             return RedirectToAction(nameof(StoreUsers));
         }
 
-        [HttpGet]
-        [Route("{storeId}/users/{userId}/delete")]
+        [HttpGet("{storeId}/users/{userId}/delete")]
         public async Task<IActionResult> DeleteStoreUser(string userId)
         {
-            StoreUsersViewModel vm = new StoreUsersViewModel();
             var user = await _UserManager.FindByIdAsync(userId);
             if (user == null)
                 return NotFound();
-            return View("Confirm", new ConfirmModel()
-            {
-                Title = $"Remove store user",
-                Description = $"Are you sure you want to remove store access for {user.Email}?",
-                Action = "Delete"
-            });
+            return View("Confirm", new ConfirmModel("Remove store user", $"This action will prevent <strong>{user.Email}</strong> from accessing this store and its settings. Are you sure?", "Remove"));
         }
 
-        [HttpPost]
-        [Route("{storeId}/users/{userId}/delete")]
+        [HttpPost("{storeId}/users/{userId}/delete")]
         public async Task<IActionResult> DeleteStoreUserPost(string storeId, string userId)
         {
             await _Repo.RemoveStoreUser(storeId, userId);
-            StatusMessage = "User removed successfully";
-            return RedirectToAction(nameof(StoreUsers), new { storeId = storeId, userId = userId });
+            TempData[WellKnownTempData.SuccessMessage] = "User removed successfully.";
+            return RedirectToAction(nameof(StoreUsers), new { storeId, userId });
         }
 
-        [HttpGet]
-        [Route("{storeId}/rates")]
+        [HttpGet("{storeId}/rates")]
         public IActionResult Rates()
         {
-            var storeBlob = StoreData.GetStoreBlob();
+            var exchanges = GetSupportedExchanges();
+            var storeBlob = CurrentStore.GetStoreBlob();
             var vm = new RatesViewModel();
-            vm.SetExchangeRates(GetSupportedExchanges(), storeBlob.PreferredExchange ?? CoinAverageRateProvider.CoinAverageName);
+            vm.SetExchangeRates(exchanges, storeBlob.PreferredExchange ?? CoinGeckoRateProvider.CoinGeckoName);
             vm.Spread = (double)(storeBlob.Spread * 100m);
+            vm.StoreId = CurrentStore.Id;
             vm.Script = storeBlob.GetRateRules(_NetworkProvider).ToString();
             vm.DefaultScript = storeBlob.GetDefaultRateRules(_NetworkProvider).ToString();
-            vm.AvailableExchanges = GetSupportedExchanges();
+            vm.AvailableExchanges = exchanges;
+            vm.DefaultCurrencyPairs = storeBlob.GetDefaultCurrencyPairString();
             vm.ShowScripting = storeBlob.RateScripting;
             return View(vm);
         }
 
-        [HttpPost]
-        [Route("{storeId}/rates")]
-        public async Task<IActionResult> Rates(RatesViewModel model, string command = null)
+        [HttpPost("{storeId}/rates")]
+        public async Task<IActionResult> Rates(RatesViewModel model, string command = null, string storeId = null, CancellationToken cancellationToken = default)
         {
-            model.SetExchangeRates(GetSupportedExchanges(), model.PreferredExchange);
+            if (command == "scripting-on")
+            {
+                return RedirectToAction(nameof(ShowRateRules), new { scripting = true, storeId = model.StoreId });
+            }
+            else if (command == "scripting-off")
+            {
+                return RedirectToAction(nameof(ShowRateRules), new { scripting = false, storeId = model.StoreId });
+            }
+
+            var exchanges = GetSupportedExchanges();
+            model.SetExchangeRates(exchanges, model.PreferredExchange);
+            model.StoreId = storeId ?? model.StoreId;
+            CurrencyPair[] currencyPairs = null;
+            try
+            {
+                currencyPairs = model.DefaultCurrencyPairs?
+                     .Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
+                     .Select(p => CurrencyPair.Parse(p))
+                     .ToArray();
+            }
+            catch
+            {
+                ModelState.AddModelError(nameof(model.DefaultCurrencyPairs), "Invalid currency pairs (should be for example: BTC_USD,BTC_CAD,BTC_JPY)");
+            }
             if (!ModelState.IsValid)
             {
                 return View(model);
@@ -213,16 +256,16 @@ namespace BTCPayServer.Controllers
             if (model.PreferredExchange != null)
                 model.PreferredExchange = model.PreferredExchange.Trim().ToLowerInvariant();
 
-            var blob = StoreData.GetStoreBlob();
+            var blob = CurrentStore.GetStoreBlob();
             model.DefaultScript = blob.GetDefaultRateRules(_NetworkProvider).ToString();
-            model.AvailableExchanges = GetSupportedExchanges();
+            model.AvailableExchanges = exchanges;
 
             blob.PreferredExchange = model.PreferredExchange;
             blob.Spread = (decimal)model.Spread / 100.0m;
-
+            blob.DefaultCurrencyPairs = currencyPairs;
             if (!model.ShowScripting)
             {
-                if (!GetSupportedExchanges().Select(c => c.Name).Contains(blob.PreferredExchange, StringComparer.OrdinalIgnoreCase))
+                if (!exchanges.Any(provider => provider.Id.Equals(model.PreferredExchange, StringComparison.InvariantCultureIgnoreCase)))
                 {
                     ModelState.AddModelError(nameof(model.PreferredExchange), $"Unsupported exchange ({model.RateSource})");
                     return View(model);
@@ -267,7 +310,7 @@ namespace BTCPayServer.Controllers
                     pairs.Add(currencyPair);
                 }
 
-                var fetchs = _RateFactory.FetchRates(pairs.ToHashSet(), rules);
+                var fetchs = _RateFactory.FetchRates(pairs.ToHashSet(), rules, cancellationToken);
                 var testResults = new List<RatesViewModel.TestResultViewModel>();
                 foreach (var fetch in fetchs)
                 {
@@ -285,302 +328,408 @@ namespace BTCPayServer.Controllers
             }
             else // command == Save
             {
-                if (StoreData.SetStoreBlob(blob))
+                if (CurrentStore.SetStoreBlob(blob))
                 {
-                    await _Repo.UpdateStore(StoreData);
-                    StatusMessage = "Rate settings updated";
+                    await _Repo.UpdateStore(CurrentStore);
+                    TempData[WellKnownTempData.SuccessMessage] = "Rate settings updated";
                 }
                 return RedirectToAction(nameof(Rates), new
                 {
-                    storeId = StoreData.Id
+                    storeId = CurrentStore.Id
                 });
             }
         }
 
-        [HttpGet]
-        [Route("{storeId}/rates/confirm")]
+        [HttpGet("{storeId}/rates/confirm")]
         public IActionResult ShowRateRules(bool scripting)
         {
-            return View("Confirm", new ConfirmModel()
+            return View("Confirm", new ConfirmModel
             {
                 Action = "Continue",
                 Title = "Rate rule scripting",
                 Description = scripting ?
                                 "This action will modify your current rate sources. Are you sure to turn on rate rules scripting? (Advanced users)"
                                 : "This action will delete your rate script. Are you sure to turn off rate rules scripting?",
-                ButtonClass = "btn-primary"
+                ButtonClass = scripting ? "btn-primary" : "btn-danger"
             });
         }
 
-        [HttpPost]
-        [Route("{storeId}/rates/confirm")]
+        [HttpPost("{storeId}/rates/confirm")]
         public async Task<IActionResult> ShowRateRulesPost(bool scripting)
         {
-            var blob = StoreData.GetStoreBlob();
+            var blob = CurrentStore.GetStoreBlob();
             blob.RateScripting = scripting;
             blob.RateScript = blob.GetDefaultRateRules(_NetworkProvider).ToString();
-            StoreData.SetStoreBlob(blob);
-            await _Repo.UpdateStore(StoreData);
-            StatusMessage = "Rate rules scripting activated";
-            return RedirectToAction(nameof(Rates), new { storeId = StoreData.Id });
+            CurrentStore.SetStoreBlob(blob);
+            await _Repo.UpdateStore(CurrentStore);
+            TempData[WellKnownTempData.SuccessMessage] = "Rate rules scripting " + (scripting ? "activated" : "deactivated");
+            return RedirectToAction(nameof(Rates), new { storeId = CurrentStore.Id });
         }
 
-        [HttpGet]
-        [Route("{storeId}/checkout")]
-        public IActionResult CheckoutExperience()
+        [HttpGet("{storeId}/checkout")]
+        public IActionResult CheckoutAppearance()
         {
-            var storeBlob = StoreData.GetStoreBlob();
-            var vm = new CheckoutExperienceViewModel();
-            SetCryptoCurrencies(vm, StoreData);
-            vm.SetLanguages(_LangService, storeBlob.DefaultLang);
-            vm.LightningMaxValue = storeBlob.LightningMaxValue?.ToString() ?? "";
-            vm.OnChainMinValue = storeBlob.OnChainMinValue?.ToString() ?? "";
+            var storeBlob = CurrentStore.GetStoreBlob();
+            var vm = new CheckoutAppearanceViewModel();
+            SetCryptoCurrencies(vm, CurrentStore);
+            vm.PaymentMethodCriteria = CurrentStore.GetSupportedPaymentMethods(_NetworkProvider)
+                                    .Where(s => !storeBlob.GetExcludedPaymentMethods().Match(s.PaymentId))
+                                    .Where(s => _NetworkProvider.GetNetwork(s.PaymentId.CryptoCode) != null)
+                                    .Where(s => s.PaymentId.PaymentType != PaymentTypes.LNURLPay)
+                                    .Select(method =>
+            {
+                var existing =
+                    storeBlob.PaymentMethodCriteria.SingleOrDefault(criteria =>
+                        criteria.PaymentMethod == method.PaymentId);
+                if (existing is null)
+                {
+                    return new PaymentMethodCriteriaViewModel()
+                    {
+                        PaymentMethod = method.PaymentId.ToString(),
+                        Value = ""
+                    };
+                }
+                else
+                {
+                    return new PaymentMethodCriteriaViewModel()
+                    {
+                        PaymentMethod = existing.PaymentMethod.ToString(),
+                        Type = existing.Above
+                            ? PaymentMethodCriteriaViewModel.CriteriaType.GreaterThan
+                            : PaymentMethodCriteriaViewModel.CriteriaType.LessThan,
+                        Value = existing.Value?.ToString() ?? ""
+                    };
+                }
+            }).ToList();
+            
             vm.RequiresRefundEmail = storeBlob.RequiresRefundEmail;
-            vm.CustomCSS = storeBlob.CustomCSS?.AbsoluteUri;
-            vm.CustomLogo = storeBlob.CustomLogo?.AbsoluteUri;
+            vm.LazyPaymentMethods = storeBlob.LazyPaymentMethods;
+            vm.RedirectAutomatically = storeBlob.RedirectAutomatically;
+            vm.CustomCSS = storeBlob.CustomCSS;
+            vm.CustomLogo = storeBlob.CustomLogo;
             vm.HtmlTitle = storeBlob.HtmlTitle;
+            vm.AutoDetectLanguage = storeBlob.AutoDetectLanguage;
+            vm.SetLanguages(_LangService, storeBlob.DefaultLang);
+            
             return View(vm);
         }
-        void SetCryptoCurrencies(CheckoutExperienceViewModel vm, Data.StoreData storeData)
-        {
-            var choices = storeData.GetEnabledPaymentIds(_NetworkProvider)
-                                      .Select(o => new CheckoutExperienceViewModel.Format() { Name = GetDisplayName(o), Value = o.ToString(), PaymentId = o }).ToArray();
 
-            var defaultPaymentId = storeData.GetDefaultPaymentId(_NetworkProvider);
-            var chosen = choices.FirstOrDefault(c => c.PaymentId == defaultPaymentId);
-            vm.CryptoCurrencies = new SelectList(choices, nameof(chosen.Value), nameof(chosen.Name), chosen?.Value);
+        void SetCryptoCurrencies(CheckoutAppearanceViewModel vm, Data.StoreData storeData)
+        {
+            var enabled = storeData.GetEnabledPaymentIds(_NetworkProvider);
+            var defaultPaymentId = storeData.GetDefaultPaymentId();
+            var defaultChoice = defaultPaymentId is PaymentMethodId ? defaultPaymentId.FindNearest(enabled) : null;
+            var choices = enabled
+                .Select(o =>
+                    new CheckoutAppearanceViewModel.Format()
+                    {
+                        Name = o.ToPrettyString(),
+                        Value = o.ToString(),
+                        PaymentId = o
+                    }).ToArray();
+            var chosen = defaultChoice is null ? null : choices.FirstOrDefault(c => defaultChoice.ToString().Equals(c.Value, StringComparison.OrdinalIgnoreCase));
+            vm.PaymentMethods = new SelectList(choices, nameof(chosen.Value), nameof(chosen.Name), chosen?.Value);
             vm.DefaultPaymentMethod = chosen?.Value;
         }
-
-        private string GetDisplayName(PaymentMethodId paymentMethodId)
-        {
-            var display = _NetworkProvider.GetNetwork(paymentMethodId.CryptoCode)?.DisplayName ?? paymentMethodId.CryptoCode;
-            return paymentMethodId.PaymentType == PaymentTypes.BTCLike ?
-                display : $"{display} (Lightning)";
-        }
-
+        
         [HttpPost]
         [Route("{storeId}/checkout")]
-        public async Task<IActionResult> CheckoutExperience(CheckoutExperienceViewModel model)
+        public async Task<IActionResult> CheckoutAppearance(CheckoutAppearanceViewModel model)
         {
-            CurrencyValue lightningMaxValue = null;
-            if (!string.IsNullOrWhiteSpace(model.LightningMaxValue))
-            {
-                if (!CurrencyValue.TryParse(model.LightningMaxValue, out lightningMaxValue))
-                {
-                    ModelState.AddModelError(nameof(model.LightningMaxValue), "Invalid lightning max value");
-                }
-            }
-
-            CurrencyValue onchainMinValue = null;
-            if (!string.IsNullOrWhiteSpace(model.OnChainMinValue))
-            {
-                if (!CurrencyValue.TryParse(model.OnChainMinValue, out onchainMinValue))
-                {
-                    ModelState.AddModelError(nameof(model.OnChainMinValue), "Invalid on chain min value");
-                }
-            }
             bool needUpdate = false;
-            var blob = StoreData.GetStoreBlob();
+            var blob = CurrentStore.GetStoreBlob();
             var defaultPaymentMethodId = model.DefaultPaymentMethod == null ? null : PaymentMethodId.Parse(model.DefaultPaymentMethod);
-            if (StoreData.GetDefaultPaymentId(_NetworkProvider) != defaultPaymentMethodId)
+            if (CurrentStore.GetDefaultPaymentId() != defaultPaymentMethodId)
             {
                 needUpdate = true;
-                StoreData.SetDefaultPaymentId(defaultPaymentMethodId);
+                CurrentStore.SetDefaultPaymentId(defaultPaymentMethodId);
             }
-            SetCryptoCurrencies(model, StoreData);
+            SetCryptoCurrencies(model, CurrentStore);
             model.SetLanguages(_LangService, model.DefaultLang);
+            model.PaymentMethodCriteria ??= new List<PaymentMethodCriteriaViewModel>();
+            for (var index = 0; index < model.PaymentMethodCriteria.Count; index++)
+            {
+                var methodCriterion = model.PaymentMethodCriteria[index];
+                if (!string.IsNullOrWhiteSpace(methodCriterion.Value))
+                {
+                    if (!CurrencyValue.TryParse(methodCriterion.Value, out var value))
+                    {
+                        model.AddModelError(viewModel => viewModel.PaymentMethodCriteria[index].Value,
+                            $"{methodCriterion.PaymentMethod}: Invalid format. Make sure to enter a valid amount and currency code. Examples: '5 USD', '0.001 BTC'", this);
+                    }
+                }
+            }
 
             if (!ModelState.IsValid)
             {
                 return View(model);
             }
-            blob.DefaultLang = model.DefaultLang;
+
+            // Payment criteria for Off-Chain should also affect LNUrl
+            foreach (var newCriteria in model.PaymentMethodCriteria.ToList())
+            {
+                var paymentMethodId = PaymentMethodId.Parse(newCriteria.PaymentMethod);
+                if (paymentMethodId.PaymentType == PaymentTypes.LightningLike)
+                    model.PaymentMethodCriteria.Add(new PaymentMethodCriteriaViewModel()
+                    {
+                        PaymentMethod = new PaymentMethodId(paymentMethodId.CryptoCode, PaymentTypes.LNURLPay).ToString(),
+                        Type = newCriteria.Type,
+                        Value = newCriteria.Value
+                    });
+                // Should not be able to set LNUrlPay criteria directly in UI
+                if (paymentMethodId.PaymentType == PaymentTypes.LNURLPay)
+                    model.PaymentMethodCriteria.Remove(newCriteria);
+            }
+            blob.PaymentMethodCriteria ??= new List<PaymentMethodCriteria>();
+            foreach (var newCriteria in model.PaymentMethodCriteria)
+            {
+                var paymentMethodId = PaymentMethodId.Parse(newCriteria.PaymentMethod);
+                var existingCriteria = blob.PaymentMethodCriteria.FirstOrDefault(c => c.PaymentMethod == paymentMethodId);
+                if (existingCriteria != null)
+                    blob.PaymentMethodCriteria.Remove(existingCriteria);
+                CurrencyValue.TryParse(newCriteria.Value, out var cv);
+                blob.PaymentMethodCriteria.Add(new PaymentMethodCriteria()
+                {
+                    Above = newCriteria.Type == PaymentMethodCriteriaViewModel.CriteriaType.GreaterThan,
+                    Value = cv,
+                    PaymentMethod = paymentMethodId
+                });
+            }
             blob.RequiresRefundEmail = model.RequiresRefundEmail;
-            blob.LightningMaxValue = lightningMaxValue;
-            blob.OnChainMinValue = onchainMinValue;
-            blob.CustomLogo = string.IsNullOrWhiteSpace(model.CustomLogo) ? null : new Uri(model.CustomLogo, UriKind.Absolute);
-            blob.CustomCSS = string.IsNullOrWhiteSpace(model.CustomCSS) ? null : new Uri(model.CustomCSS, UriKind.Absolute);
+            blob.LazyPaymentMethods = model.LazyPaymentMethods;
+            blob.RedirectAutomatically = model.RedirectAutomatically;
+            blob.CustomLogo = model.CustomLogo;
+            blob.CustomCSS = model.CustomCSS;
             blob.HtmlTitle = string.IsNullOrWhiteSpace(model.HtmlTitle) ? null : model.HtmlTitle;
-            if (StoreData.SetStoreBlob(blob))
+            blob.AutoDetectLanguage = model.AutoDetectLanguage;
+            blob.DefaultLang = model.DefaultLang;
+
+            if (CurrentStore.SetStoreBlob(blob))
             {
                 needUpdate = true;
             }
             if (needUpdate)
             {
-                await _Repo.UpdateStore(StoreData);
-                StatusMessage = "Store successfully updated";
+                await _Repo.UpdateStore(CurrentStore);
+                TempData[WellKnownTempData.SuccessMessage] = "Store successfully updated";
             }
 
-            return RedirectToAction(nameof(CheckoutExperience), new
+            return RedirectToAction(nameof(CheckoutAppearance), new
             {
-                storeId = StoreData.Id
+                storeId = CurrentStore.Id
             });
         }
 
-        [HttpGet]
-        [Route("{storeId}")]
-        public IActionResult UpdateStore()
+        private void AddPaymentMethods(StoreData store, StoreBlob storeBlob, 
+            out List<StoreDerivationScheme> derivationSchemes, out List<StoreLightningNode> lightningNodes)
+        {
+            var excludeFilters = storeBlob.GetExcludedPaymentMethods();
+            var derivationByCryptoCode =
+                store
+                .GetSupportedPaymentMethods(_NetworkProvider)
+                .OfType<DerivationSchemeSettings>()
+                .ToDictionary(c => c.Network.CryptoCode.ToUpperInvariant());
+
+            var lightningByCryptoCode = store
+                .GetSupportedPaymentMethods(_NetworkProvider)
+                .OfType<LightningSupportedPaymentMethod>()
+                .Where(method => method.PaymentId.PaymentType == LightningPaymentType.Instance)
+                .ToDictionary(c => c.CryptoCode.ToUpperInvariant());
+
+            derivationSchemes = new List<StoreDerivationScheme>();
+            lightningNodes = new List<StoreLightningNode>();
+
+            foreach (var paymentMethodId in _paymentMethodHandlerDictionary.Distinct().SelectMany(handler => handler.GetSupportedPaymentMethods()))
+            {
+                switch (paymentMethodId.PaymentType)
+                {
+                    case BitcoinPaymentType _:
+                        var strategy = derivationByCryptoCode.TryGet(paymentMethodId.CryptoCode);
+                        var network = _NetworkProvider.GetNetwork<BTCPayNetwork>(paymentMethodId.CryptoCode);
+                        var value = strategy?.ToPrettyString() ?? string.Empty;
+
+                        derivationSchemes.Add(new StoreDerivationScheme
+                        {
+                            Crypto = paymentMethodId.CryptoCode,
+                            WalletSupported = network.WalletSupported,
+                            Value = value,
+                            WalletId = new WalletId(store.Id, paymentMethodId.CryptoCode),
+                            Enabled = !excludeFilters.Match(paymentMethodId) && strategy != null,
+#if ALTCOINS
+                            Collapsed = network is ElementsBTCPayNetwork elementsBTCPayNetwork && elementsBTCPayNetwork.NetworkCryptoCode != elementsBTCPayNetwork.CryptoCode && string.IsNullOrEmpty(value)
+#endif
+                        });
+                        break;
+                    
+                    case LNURLPayPaymentType lnurlPayPaymentType:
+                        break;
+                    
+                    case LightningPaymentType _:
+                        var lightning = lightningByCryptoCode.TryGet(paymentMethodId.CryptoCode);
+                        var isEnabled = !excludeFilters.Match(paymentMethodId) && lightning != null;
+                        lightningNodes.Add(new StoreLightningNode
+                        {
+                            CryptoCode = paymentMethodId.CryptoCode,
+                            Address = lightning?.GetDisplayableConnectionString(),
+                            Enabled = isEnabled
+                        });
+                        break;
+                }
+            }
+        }
+
+        [HttpGet("{storeId}")]
+        public IActionResult PaymentMethods()
         {
             var store = HttpContext.GetStoreData();
             if (store == null)
                 return NotFound();
 
             var storeBlob = store.GetStoreBlob();
-            var vm = new StoreViewModel();
-            vm.Id = store.Id;
-            vm.StoreName = store.StoreName;
-            vm.StoreWebsite = store.StoreWebsite;
-            vm.NetworkFeeMode = storeBlob.NetworkFeeMode;
-            vm.AnyoneCanCreateInvoice = storeBlob.AnyoneCanInvoice;
-            vm.SpeedPolicy = store.SpeedPolicy;
-            vm.CanDelete = _Repo.CanDeleteStores();
-            AddPaymentMethods(store, storeBlob, vm);
-            vm.MonitoringExpiration = storeBlob.MonitoringExpiration;
-            vm.InvoiceExpiration = storeBlob.InvoiceExpiration;
-            vm.LightningDescriptionTemplate = storeBlob.LightningDescriptionTemplate;
-            vm.PaymentTolerance = storeBlob.PaymentTolerance;
+            var vm = new PaymentMethodsViewModel
+            {
+                Id = store.Id,
+                HintWallet = storeBlob.Hints.Wallet,
+                HintLightning = storeBlob.Hints.Lightning,
+                NetworkFeeMode = storeBlob.NetworkFeeMode,
+                AnyoneCanCreateInvoice = storeBlob.AnyoneCanInvoice,
+                PaymentTolerance = storeBlob.PaymentTolerance,
+                InvoiceExpiration = (int)storeBlob.InvoiceExpiration.TotalMinutes,
+                DefaultCurrency = storeBlob.DefaultCurrency
+            };
+            
+            AddPaymentMethods(store, storeBlob, 
+                out var derivationSchemes, out var lightningNodes);
+            
+            vm.DerivationSchemes = derivationSchemes;
+            vm.LightningNodes = lightningNodes;
+            
             return View(vm);
         }
 
-
-        private void AddPaymentMethods(StoreData store, StoreBlob storeBlob, StoreViewModel vm)
-        {
-            var excludeFilters = storeBlob.GetExcludedPaymentMethods();
-            var derivationByCryptoCode =
-                store
-                .GetSupportedPaymentMethods(_NetworkProvider)
-                .OfType<DerivationStrategy>()
-                .ToDictionary(c => c.Network.CryptoCode);
-            foreach (var network in _NetworkProvider.GetAll())
-            {
-                var strategy = derivationByCryptoCode.TryGet(network.CryptoCode);
-                vm.DerivationSchemes.Add(new StoreViewModel.DerivationScheme()
-                {
-                    Crypto = network.CryptoCode,
-                    Value = strategy?.DerivationStrategyBase?.ToString() ?? string.Empty,
-                    WalletId = new WalletId(store.Id, network.CryptoCode),
-                    Enabled = !excludeFilters.Match(new Payments.PaymentMethodId(network.CryptoCode, Payments.PaymentTypes.BTCLike))
-                });
-            }
-
-            var lightningByCryptoCode = store
-                                        .GetSupportedPaymentMethods(_NetworkProvider)
-                                        .OfType<Payments.Lightning.LightningSupportedPaymentMethod>()
-                                        .ToDictionary(c => c.CryptoCode);
-
-            foreach (var network in _NetworkProvider.GetAll())
-            {
-                var lightning = lightningByCryptoCode.TryGet(network.CryptoCode);
-                var paymentId = new Payments.PaymentMethodId(network.CryptoCode, Payments.PaymentTypes.LightningLike);
-                vm.LightningNodes.Add(new StoreViewModel.LightningNode()
-                {
-                    CryptoCode = network.CryptoCode,
-                    Address = lightning?.GetLightningUrl()?.BaseUri.AbsoluteUri ?? string.Empty,
-                    Enabled = !excludeFilters.Match(paymentId)
-                });
-            }
-
-
-            var changellyEnabled = storeBlob.ChangellySettings != null && storeBlob.ChangellySettings.Enabled;
-            vm.ThirdPartyPaymentMethods.Add(new StoreViewModel.ThirdPartyPaymentMethod()
-            {
-                Enabled = changellyEnabled,
-                Action = nameof(UpdateChangellySettings),
-                Provider = "Changelly"
-            });
-            
-            var coinSwitchEnabled = storeBlob.CoinSwitchSettings != null && storeBlob.CoinSwitchSettings.Enabled;
-            vm.ThirdPartyPaymentMethods.Add(new StoreViewModel.ThirdPartyPaymentMethod()
-            {
-                Enabled = coinSwitchEnabled,
-                Action = nameof(UpdateCoinSwitchSettings),
-                Provider = "CoinSwitch"
-            });
-        }
-
-        [HttpPost]
-        [Route("{storeId}")]
-        public async Task<IActionResult> UpdateStore(StoreViewModel model, string command = null)
+        [HttpPost("{storeId}")]
+        public async Task<IActionResult> PaymentMethods(PaymentMethodsViewModel model, string command = null)
         {
             bool needUpdate = false;
-            if (StoreData.SpeedPolicy != model.SpeedPolicy)
-            {
-                needUpdate = true;
-                StoreData.SpeedPolicy = model.SpeedPolicy;
-            }
-            if (StoreData.StoreName != model.StoreName)
-            {
-                needUpdate = true;
-                StoreData.StoreName = model.StoreName;
-            }
-            if (StoreData.StoreWebsite != model.StoreWebsite)
-            {
-                needUpdate = true;
-                StoreData.StoreWebsite = model.StoreWebsite;
-            }
-
-            var blob = StoreData.GetStoreBlob();
+            var blob = CurrentStore.GetStoreBlob();
             blob.AnyoneCanInvoice = model.AnyoneCanCreateInvoice;
             blob.NetworkFeeMode = model.NetworkFeeMode;
-            blob.MonitoringExpiration = model.MonitoringExpiration;
-            blob.InvoiceExpiration = model.InvoiceExpiration;
-            blob.LightningDescriptionTemplate = model.LightningDescriptionTemplate ?? string.Empty;
             blob.PaymentTolerance = model.PaymentTolerance;
-
-            if (StoreData.SetStoreBlob(blob))
+            blob.DefaultCurrency = model.DefaultCurrency;
+            blob.InvoiceExpiration = TimeSpan.FromMinutes(model.InvoiceExpiration);
+            
+            if (CurrentStore.SetStoreBlob(blob))
             {
                 needUpdate = true;
             }
 
             if (needUpdate)
             {
-                await _Repo.UpdateStore(StoreData);
-                StatusMessage = "Store successfully updated";
+                await _Repo.UpdateStore(CurrentStore);
+
+                TempData[WellKnownTempData.SuccessMessage] = "Payment settings successfully updated";
             }
 
-            return RedirectToAction(nameof(UpdateStore), new
+            return RedirectToAction(nameof(PaymentMethods), new
             {
-                storeId = StoreData.Id
+                storeId = CurrentStore.Id
             });
+        }
+        
+        [HttpGet("{storeId}/settings")]
+        public IActionResult GeneralSettings()
+        {
+            var store = HttpContext.GetStoreData();
+            if (store == null)
+                return NotFound();
 
+            var vm = new GeneralSettingsViewModel
+            {
+                Id = store.Id,
+                StoreName = store.StoreName,
+                StoreWebsite = store.StoreWebsite,
+                CanDelete = _Repo.CanDeleteStores()
+            };
+            
+            return View(vm);
         }
 
-        [HttpGet]
-        [Route("{storeId}/delete")]
+        [HttpPost("{storeId}/settings")]
+        public async Task<IActionResult> GeneralSettings(GeneralSettingsViewModel model, string command = null)
+        {
+            bool needUpdate = false;
+            if (CurrentStore.StoreName != model.StoreName)
+            {
+                needUpdate = true;
+                CurrentStore.StoreName = model.StoreName;
+            }
+            
+            if (CurrentStore.StoreWebsite != model.StoreWebsite)
+            {
+                needUpdate = true;
+                CurrentStore.StoreWebsite = model.StoreWebsite;
+            }
+
+            if (needUpdate)
+            {
+                await _Repo.UpdateStore(CurrentStore);
+
+                TempData[WellKnownTempData.SuccessMessage] = "Store successfully updated";
+            }
+
+            return RedirectToAction(nameof(GeneralSettings), new
+            {
+                storeId = CurrentStore.Id
+            });
+        }
+        
+        [HttpGet("{storeId}/delete")]
         public IActionResult DeleteStore(string storeId)
         {
-            return View("Confirm", new ConfirmModel()
-            {
-                Action = "Delete this store",
-                Title = "Delete this store",
-                Description = "This action is irreversible and will remove all information related to this store. (Invoices, Apps etc...)",
-                ButtonClass = "btn-danger"
-            });
+            return View("Confirm", new ConfirmModel("Delete store", "The store will be permanently deleted. This action will also delete all invoices, apps and data associated with the store. Are you sure?", "Delete"));
         }
 
-        [HttpPost]
-        [Route("{storeId}/delete")]
+        [HttpPost("{storeId}/delete")]
         public async Task<IActionResult> DeleteStorePost(string storeId)
         {
-            await _Repo.DeleteStore(StoreData.Id);
-            StatusMessage = "Success: Store successfully deleted";
+            await _Repo.DeleteStore(CurrentStore.Id);
+            TempData[WellKnownTempData.SuccessMessage] = "Store successfully deleted.";
             return RedirectToAction(nameof(UserStoresController.ListStores), "UserStores");
         }
 
-        private CoinAverageExchange[] GetSupportedExchanges()
+        private IEnumerable<AvailableRateProvider> GetSupportedExchanges()
         {
-            return _RateFactory.RateProviderFactory.GetSupportedExchanges()
-                    .Select(c => c.Value)
-                    .OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase)
-                    .ToArray();
+            var exchanges = _RateFactory.RateProviderFactory.GetSupportedExchanges();
+            return exchanges
+                .Where(r => !string.IsNullOrWhiteSpace(r.Name))
+                .OrderBy(s => s.Id, StringComparer.OrdinalIgnoreCase);
+
         }
 
-        private DerivationStrategy ParseDerivationStrategy(string derivationScheme, Script hint, BTCPayNetwork network)
+        private DerivationSchemeSettings ParseDerivationStrategy(string derivationScheme, BTCPayNetwork network)
         {
-            var parser = new DerivationSchemeParser(network.NBitcoinNetwork);
-            parser.HintScriptPubKey = hint;
-            return new DerivationStrategy(parser.Parse(derivationScheme), network);
+            var parser = new DerivationSchemeParser(network);
+            try
+            {
+                var derivationSchemeSettings = new DerivationSchemeSettings();
+                derivationSchemeSettings.Network = network;
+                var result = parser.ParseOutputDescriptor(derivationScheme);
+                derivationSchemeSettings.AccountOriginal = derivationScheme.Trim();
+                derivationSchemeSettings.AccountDerivation = result.Item1;
+                derivationSchemeSettings.AccountKeySettings = result.Item2?.Select((path, i) => new AccountKeySettings()
+                {
+                    RootFingerprint = path?.MasterFingerprint,
+                    AccountKeyPath = path?.KeyPath,
+                    AccountKey = result.Item1.GetExtPubKeys().ElementAt(i).GetWif(parser.Network)
+                }).ToArray() ?? new AccountKeySettings[result.Item1.GetExtPubKeys().Count()];
+                return derivationSchemeSettings;
+            }
+            catch (Exception)
+            {
+                // ignored
+            }
+
+            return new DerivationSchemeSettings(parser.Parse(derivationScheme), network);
         }
 
         [HttpGet]
@@ -588,52 +737,43 @@ namespace BTCPayServer.Controllers
         public async Task<IActionResult> ListTokens()
         {
             var model = new TokensViewModel();
-            var tokens = await _TokenRepository.GetTokensByStoreIdAsync(StoreData.Id);
-            model.StatusMessage = StatusMessage;
+            var tokens = await _TokenRepository.GetTokensByStoreIdAsync(CurrentStore.Id);
             model.StoreNotConfigured = StoreNotConfigured;
             model.Tokens = tokens.Select(t => new TokenViewModel()
             {
-                Facade = t.Facade,
                 Label = t.Label,
                 SIN = t.SIN,
                 Id = t.Value
             }).ToArray();
 
-            model.ApiKey = (await _TokenRepository.GetLegacyAPIKeys(StoreData.Id)).FirstOrDefault();
+            model.ApiKey = (await _TokenRepository.GetLegacyAPIKeys(CurrentStore.Id)).FirstOrDefault();
             if (model.ApiKey == null)
                 model.EncodedApiKey = "*API Key*";
             else
                 model.EncodedApiKey = Encoders.Base64.EncodeData(Encoders.ASCII.DecodeData(model.ApiKey));
             return View(model);
         }
-
-        [HttpGet]
-        [Route("{storeId}/tokens/{tokenId}/revoke")]
+        
+        [HttpGet("{storeId}/tokens/{tokenId}/revoke")]
         public async Task<IActionResult> RevokeToken(string tokenId)
         {
             var token = await _TokenRepository.GetToken(tokenId);
-            if (token == null || token.StoreId != StoreData.Id)
+            if (token == null || token.StoreId != CurrentStore.Id)
                 return NotFound();
-            return View("Confirm", new ConfirmModel()
-            {
-                Action = "Revoke the token",
-                Title = "Revoke the token",
-                Description = $"The access token with the label \"{token.Label}\" will be revoked, do you wish to continue?",
-                ButtonClass = "btn-danger"
-            });
+            return View("Confirm", new ConfirmModel("Revoke the token", $"The access token with the label <strong>{token.Label}</strong> will be revoked. Do you wish to continue?", "Revoke"));
         }
-        [HttpPost]
-        [Route("{storeId}/tokens/{tokenId}/revoke")]
+        
+        [HttpPost("{storeId}/tokens/{tokenId}/revoke")]
         public async Task<IActionResult> RevokeTokenConfirm(string tokenId)
         {
             var token = await _TokenRepository.GetToken(tokenId);
             if (token == null ||
-                token.StoreId != StoreData.Id ||
+                token.StoreId != CurrentStore.Id ||
                !await _TokenRepository.DeleteToken(tokenId))
-                StatusMessage = "Failure to revoke this token";
+                TempData[WellKnownTempData.ErrorMessage] = "Failure to revoke this token.";
             else
-                StatusMessage = "Token revoked";
-            return RedirectToAction(nameof(ListTokens));
+                TempData[WellKnownTempData.SuccessMessage] = "Token revoked";
+            return RedirectToAction(nameof(ListTokens), new { storeId = token.StoreId });
         }
 
         [HttpGet]
@@ -641,44 +781,29 @@ namespace BTCPayServer.Controllers
         public async Task<IActionResult> ShowToken(string tokenId)
         {
             var token = await _TokenRepository.GetToken(tokenId);
-            if (token == null || token.StoreId != StoreData.Id)
+            if (token == null || token.StoreId != CurrentStore.Id)
                 return NotFound();
             return View(token);
         }
 
         [HttpPost]
-        [Route("/api-tokens")]
         [Route("{storeId}/Tokens/Create")]
-        [AllowAnonymous]
-        public async Task<IActionResult> CreateToken(CreateTokenViewModel model)
+        public async Task<IActionResult> CreateToken(string storeId, CreateTokenViewModel model)
         {
             if (!ModelState.IsValid)
             {
-                return View(model);
+                return View(nameof(CreateToken), model);
             }
             model.Label = model.Label ?? String.Empty;
             var userId = GetUserId();
             if (userId == null)
-                return Challenge(Policies.CookieAuthentication);
-
-            var store = StoreData;
-            var storeId = StoreData?.Id;
-            if (storeId == null)
-            {
-                storeId = model.StoreId;
-                store = await _Repo.FindStore(storeId, userId);
-                if (store == null)
-                    return Challenge(Policies.CookieAuthentication);
-            }
-
-            if (!store.HasClaim(Policies.CanModifyStoreSettings.Key))
-            {
-                return Challenge(Policies.CookieAuthentication);
-            }
-
+                return Challenge(AuthenticationSchemes.Cookie);
+            storeId = model.StoreId;
+            var store = CurrentStore ?? await _Repo.FindStore(storeId, userId);
+            if (store == null)
+                return Challenge(AuthenticationSchemes.Cookie);
             var tokenRequest = new TokenRequest()
             {
-                Facade = model.Facade,
                 Label = model.Label,
                 Id = model.PublicKey == null ? null : NBitpayClient.Extensions.BitIdExtensions.GetBitIDSIN(new PubKey(model.PublicKey))
             };
@@ -690,7 +815,6 @@ namespace BTCPayServer.Controllers
                 await _TokenRepository.UpdatePairingCode(new PairingCodeEntity()
                 {
                     Id = tokenRequest.PairingCode,
-                    Facade = model.Facade,
                     Label = model.Label,
                 });
                 await _TokenRepository.PairWithStoreAsync(tokenRequest.PairingCode, storeId);
@@ -698,7 +822,7 @@ namespace BTCPayServer.Controllers
             }
             else
             {
-                pairingCode = ((DataWrapper<List<PairingCodeResponse>>)await _TokenController.Tokens(tokenRequest)).Data[0].PairingCode;
+                pairingCode = (await _TokenController.Tokens(tokenRequest)).Data[0].PairingCode;
             }
 
             GeneratedPairingCode = pairingCode;
@@ -710,54 +834,80 @@ namespace BTCPayServer.Controllers
         }
 
         public string GeneratedPairingCode { get; set; }
-        public IOptions<MvcJsonOptions> MvcJsonOptions { get; }
+        public WebhookNotificationManager WebhookNotificationManager { get; }
+        public IDataProtector DataProtector { get; }
+
+        [HttpGet]
+        [Route("{storeId}/Tokens/Create")]
+        public IActionResult CreateToken(string storeId)
+        {
+            var model = new CreateTokenViewModel();
+            ViewBag.HidePublicKey = storeId == null;
+            ViewBag.ShowStores = storeId == null;
+            ViewBag.ShowMenu = storeId != null;
+            model.StoreId = storeId;
+            return View(model);
+        }
 
         [HttpGet]
         [Route("/api-tokens")]
-        [Route("{storeId}/Tokens/Create")]
         [AllowAnonymous]
         public async Task<IActionResult> CreateToken()
         {
             var userId = GetUserId();
             if (string.IsNullOrWhiteSpace(userId))
-                return Challenge(Policies.CookieAuthentication);
-            var storeId = StoreData?.Id;
-            if (StoreData != null)
+                return Challenge(AuthenticationSchemes.Cookie);
+            var storeId = CurrentStore?.Id;
+            if (storeId != null)
             {
-                if (!StoreData.HasClaim(Policies.CanModifyStoreSettings.Key))
-                {
-                    return Challenge(Policies.CookieAuthentication);
-                }
+                var store = await _Repo.FindStore(storeId, userId);
+                if (store != null)
+                    HttpContext.SetStoreData(store);
             }
             var model = new CreateTokenViewModel();
-            model.Facade = "merchant";
-            ViewBag.HidePublicKey = storeId == null;
-            ViewBag.ShowStores = storeId == null;
-            ViewBag.ShowMenu = storeId != null;
-            model.StoreId = storeId;
-            if (storeId == null)
+            ViewBag.HidePublicKey = true;
+            ViewBag.ShowStores = true;
+            ViewBag.ShowMenu = false;
+            var stores = await _Repo.GetStoresByUserId(userId);
+            model.Stores = new SelectList(stores.Where(s => s.Role == StoreRoles.Owner), nameof(CurrentStore.Id), nameof(CurrentStore.StoreName));
+            if (!model.Stores.Any())
             {
-                var stores = await _Repo.GetStoresByUserId(userId);
-                model.Stores = new SelectList(stores.Where(s => s.HasClaim(Policies.CanModifyStoreSettings.Key)), nameof(StoreData.Id), nameof(StoreData.StoreName), storeId);
-                if (model.Stores.Count() == 0)
-                {
-                    StatusMessage = "Error: You need to be owner of at least one store before pairing";
-                    return RedirectToAction(nameof(UserStoresController.ListStores), "UserStores");
-                }
+                TempData[WellKnownTempData.ErrorMessage] = "You need to be owner of at least one store before pairing";
+                return RedirectToAction(nameof(UserStoresController.ListStores), "UserStores");
             }
             return View(model);
         }
 
         [HttpPost]
+        [Route("/api-tokens")]
+        [AllowAnonymous]
+        public Task<IActionResult> CreateToken2(CreateTokenViewModel model)
+        {
+            return CreateToken(model.StoreId, model);
+        }
+
+        [HttpPost]
         [Route("{storeId}/tokens/apikey")]
-        public async Task<IActionResult> GenerateAPIKey()
+        public async Task<IActionResult> GenerateAPIKey(string storeId, string command = "")
         {
             var store = HttpContext.GetStoreData();
             if (store == null)
                 return NotFound();
-            await _TokenRepository.GenerateLegacyAPIKey(StoreData.Id);
-            StatusMessage = "API Key re-generated";
-            return RedirectToAction(nameof(ListTokens));
+            if (command == "revoke")
+            {
+                await _TokenRepository.RevokeLegacyAPIKeys(CurrentStore.Id);
+                TempData[WellKnownTempData.SuccessMessage] = "API Key revoked";
+            }
+            else
+            {
+                await _TokenRepository.GenerateLegacyAPIKey(CurrentStore.Id);
+                TempData[WellKnownTempData.SuccessMessage] = "API Key re-generated";
+            }
+
+            return RedirectToAction(nameof(ListTokens), new
+            {
+                storeId
+            });
         }
 
         [HttpGet]
@@ -767,26 +917,33 @@ namespace BTCPayServer.Controllers
         {
             var userId = GetUserId();
             if (userId == null)
-                return Challenge(Policies.CookieAuthentication);
+                return Challenge(AuthenticationSchemes.Cookie);
             if (pairingCode == null)
                 return NotFound();
+            if (selectedStore != null)
+            {
+                var store = await _Repo.FindStore(selectedStore, userId);
+                if (store == null)
+                    return NotFound();
+                HttpContext.SetStoreData(store);
+                ViewBag.ShowStores = false;
+            }
             var pairing = await _TokenRepository.GetPairingAsync(pairingCode);
             if (pairing == null)
             {
-                StatusMessage = "Unknown pairing code";
+                TempData[WellKnownTempData.ErrorMessage] = "Unknown pairing code";
                 return RedirectToAction(nameof(UserStoresController.ListStores), "UserStores");
             }
             else
             {
                 var stores = await _Repo.GetStoresByUserId(userId);
-                return View(new PairingModel()
+                return View(new PairingModel
                 {
                     Id = pairing.Id,
-                    Facade = pairing.Facade,
                     Label = pairing.Label,
                     SIN = pairing.SIN ?? "Server-Initiated Pairing",
-                    SelectedStore = selectedStore ?? stores.FirstOrDefault()?.Id,
-                    Stores = stores.Where(u => u.HasClaim(Policies.CanModifyStoreSettings.Key)).Select(s => new PairingModel.StoreViewModel()
+                    StoreId = selectedStore ?? stores.FirstOrDefault()?.Id,
+                    Stores = stores.Where(u => u.Role == StoreRoles.Owner).Select(s => new PairingModel.StoreViewModel()
                     {
                         Id = s.Id,
                         Name = string.IsNullOrEmpty(s.StoreName) ? s.Id : s.StoreName
@@ -797,34 +954,25 @@ namespace BTCPayServer.Controllers
 
         [HttpPost]
         [Route("/api-access-request")]
-        [AllowAnonymous]
-        public async Task<IActionResult> Pair(string pairingCode, string selectedStore)
+        public async Task<IActionResult> Pair(string pairingCode, string storeId)
         {
             if (pairingCode == null)
                 return NotFound();
-            var userId = GetUserId();
-            if (userId == null)
-                return Challenge(Policies.CookieAuthentication);
-            var store = await _Repo.FindStore(selectedStore, userId);
+            var store = CurrentStore;
             var pairing = await _TokenRepository.GetPairingAsync(pairingCode);
             if (store == null || pairing == null)
                 return NotFound();
-
-            if (!store.HasClaim(Policies.CanModifyStoreSettings.Key))
-            {
-                return Challenge(Policies.CookieAuthentication);
-            }
 
             var pairingResult = await _TokenRepository.PairWithStoreAsync(pairingCode, store.Id);
             if (pairingResult == PairingResult.Complete || pairingResult == PairingResult.Partial)
             {
                 var excludeFilter = store.GetStoreBlob().GetExcludedPaymentMethods();
-                StoreNotConfigured = store.GetSupportedPaymentMethods(_NetworkProvider)
+                StoreNotConfigured = !store.GetSupportedPaymentMethods(_NetworkProvider)
                                           .Where(p => !excludeFilter.Match(p.PaymentId))
-                                          .Count() == 0;
-                StatusMessage = "Pairing is successful";
+                                          .Any();
+                TempData[WellKnownTempData.SuccessMessage] = "Pairing is successful";
                 if (pairingResult == PairingResult.Partial)
-                    StatusMessage = "Server initiated pairing code: " + pairingCode;
+                    TempData[WellKnownTempData.SuccessMessage] = "Server initiated pairing code: " + pairingCode;
                 return RedirectToAction(nameof(ListTokens), new
                 {
                     storeId = store.Id,
@@ -833,7 +981,7 @@ namespace BTCPayServer.Controllers
             }
             else
             {
-                StatusMessage = $"Pairing failed ({pairingResult})";
+                TempData[WellKnownTempData.ErrorMessage] = $"Pairing failed ({pairingResult})";
                 return RedirectToAction(nameof(ListTokens), new
                 {
                     storeId = store.Id
@@ -843,21 +991,19 @@ namespace BTCPayServer.Controllers
 
         private string GetUserId()
         {
-            if (User.Identity.AuthenticationType != Policies.CookieAuthentication)
+            if (User.Identity.AuthenticationType != AuthenticationSchemes.Cookie)
                 return null;
             return _UserManager.GetUserId(User);
         }
-
-
 
         // TODO: Need to have talk about how architect default currency implementation
         // For now we have also hardcoded USD for Store creation and then Invoice creation
         const string DEFAULT_CURRENCY = "USD";
 
         [Route("{storeId}/paybutton")]
-        public IActionResult PayButton()
+        public async Task<IActionResult> PayButton()
         {
-            var store = StoreData;
+            var store = CurrentStore;
 
             var storeBlob = store.GetStoreBlob();
             if (!storeBlob.AnyoneCanInvoice)
@@ -865,15 +1011,21 @@ namespace BTCPayServer.Controllers
                 return View("PayButtonEnable", null);
             }
 
+            var apps = await _appService.GetAllApps(_UserManager.GetUserId(User), false, store.Id);
             var appUrl = HttpContext.Request.GetAbsoluteRoot().WithTrailingSlash();
             var model = new PayButtonViewModel
             {
-                Price = 10,
+                Price = null,
                 Currency = DEFAULT_CURRENCY,
                 ButtonSize = 2,
                 UrlRoot = appUrl,
-                PayButtonImageUrl = appUrl + "img/paybutton/pay.png",
-                StoreId = store.Id
+                PayButtonImageUrl = appUrl + "img/paybutton/pay.svg",
+                StoreId = store.Id,
+                ButtonType = 0,
+                Min = 1,
+                Max = 20,
+                Step = "1",
+                Apps = apps
             };
             return View(model);
         }
@@ -882,19 +1034,18 @@ namespace BTCPayServer.Controllers
         [Route("{storeId}/paybutton")]
         public async Task<IActionResult> PayButton(bool enableStore)
         {
-            var blob = StoreData.GetStoreBlob();
+            var blob = CurrentStore.GetStoreBlob();
             blob.AnyoneCanInvoice = enableStore;
-            if (StoreData.SetStoreBlob(blob))
+            if (CurrentStore.SetStoreBlob(blob))
             {
-                await _Repo.UpdateStore(StoreData);
-                StatusMessage = "Store successfully updated";
+                await _Repo.UpdateStore(CurrentStore);
+                TempData[WellKnownTempData.SuccessMessage] = "Store successfully updated";
             }
 
             return RedirectToAction(nameof(PayButton), new
             {
-                storeId = StoreData.Id
+                storeId = CurrentStore.Id
             });
-
         }
     }
 }

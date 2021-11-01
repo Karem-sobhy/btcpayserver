@@ -1,9 +1,3 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
-using NBitcoin;
-
 namespace BTCPayServer.Payments
 {
     /// <summary>
@@ -16,16 +10,14 @@ namespace BTCPayServer.Payments
         /// </summary>
         /// <returns></returns>
         string GetPaymentDestination();
-        PaymentTypes GetPaymentType();
+        PaymentType GetPaymentType();
         /// <summary>
         /// Returns fee that the merchant charge to the customer for the next payment
         /// </summary>
         /// <returns></returns>
         decimal GetNextNetworkFee();
-        /// <summary>
-        /// Change the payment destination (internal plumbing)
-        /// </summary>
-        /// <param name="newPaymentDestination"></param>
-        void SetPaymentDestination(string newPaymentDestination);
+
+        bool Activated {get;set;}
+        virtual string GetAdditionalDataPartialName()  => null;
     }
 }

@@ -3,7 +3,7 @@
   "code": "sk-SK",
   "currentLanguage": "Slovenčina",
   "lang": "Jazyk",
-  "Awaiting Payment...": "Očakávam platbu...",
+  "Awaiting Payment...": "Čakám na platbu...",
   "Pay with": "Zaplatiť s",
   "Contact and Refund Email": "E-mail na kontaktovanie a vrátenie platby",
   "Contact_Body": "Nižšie zadajte e-mailovú adresu. Ak sa vyskytne problém s Vašou platbou, kontaktujeme Vás na tejto adrese.",
@@ -44,7 +44,9 @@
   "Node Info": "Informácia o uzle",
   "txCount": "{{count}} transakcia",
   "txCount_plural": "{{count}} transakcií",
-  "Pay with CoinSwitch": "Pay with CoinSwitch",
-  "Pay with Changelly": "Pay with Changelly",
-  "Close": "Close"
+  "Pay with CoinSwitch": "Zaplatiť cez CoinSwitch",
+  "Pay with Changelly": "Zaplatiť cez Changelly",
+  "Close": "Zatvoriť",
+  "NotPaid_ExtraTransaction": "Faktúra nebola uhradená v plnej výške. Prosím pošlite inú transakciu na pokrytie dlžnej sumy.",
+  "Recommended_Fee": "Odporúčaný poplatok: {{feeRate}} sat/bajt"
 }

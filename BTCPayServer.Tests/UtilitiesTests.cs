@@ -1,6 +1,5 @@
-﻿using System;
+using System.IO;
 using System.Linq;
-using System.Collections.Generic;
 using System.Net.Http;
 using System.Text;
 using System.Threading.Tasks;
@@ -8,7 +7,6 @@ using Microsoft.Extensions.Configuration;
 using NBitcoin.DataEncoders;
 using Newtonsoft.Json.Linq;
 using Xunit;
-using System.IO;
 
 namespace BTCPayServer.Tests
 {
@@ -30,14 +28,14 @@ namespace BTCPayServer.Tests
             var json = await client.GetTransifexAsync("https://api.transifex.com/organizations/btcpayserver/projects/btcpayserver/resources/enjson/");
             var langs = new[] { "en" }.Concat(((JObject)json["stats"]).Properties().Select(n => n.Name)).ToArray();
 
-            var langsDir = Path.Combine(Services.LanguageService.TryGetSolutionDirectoryInfo().FullName, "BTCPayServer", "wwwroot", "locales");
+            var langsDir = Path.Combine(TestUtils.TryGetSolutionDirectoryInfo().FullName, "BTCPayServer", "wwwroot", "locales");
 
             JObject sourceLang = null;
             Task.WaitAll(langs.Select(async l =>
             {
                 bool isSourceLang = l == "en";
                 var j = await client.GetTransifexAsync($"https://www.transifex.com/api/2/project/btcpayserver/resource/enjson/translation/{l}/");
-                if(!isSourceLang)
+                if (!isSourceLang)
                 {
                     while (sourceLang == null)
                         await Task.Delay(10);
@@ -67,7 +65,7 @@ namespace BTCPayServer.Tests
                 }
                 else
                 {
-                    if(jobj["InvoiceExpired_Body_3"].Value<string>() == sourceLang["InvoiceExpired_Body_3"].Value<string>())
+                    if (jobj["InvoiceExpired_Body_3"].Value<string>() == sourceLang["InvoiceExpired_Body_3"].Value<string>())
                     {
                         jobj["InvoiceExpired_Body_3"] = string.Empty;
                     }

@@ -1,0 +1,27 @@
+@model Fido2NetLib.CredentialCreateOptions
+@{
+    ViewData.SetActivePageAndTitle(ManageNavPages.Fido2, "Register your security device");
+}
+
+<form asp-action="CreateResponse" id="registerForm">
+    <input type="hidden" name="data" id="data" />
+    <input type="hidden" name="name" id="name" value="@(ViewData.ContainsKey("CredentialName")? ViewData["CredentialName"] : string.Empty)" />
+</form>
+<div class="row">
+    <div class="col-lg-8">
+        <div id="info-message" class="alert alert-info my-3 d-flex justify-content-center align-items-center">
+            <span id="spinner" class="fa fa-spinner fa-spin float-end me-3 fido-running" style="font-size:2.5em"></span>
+            <span>Insert your security device into your computer's USB port. If it has a button, tap on it.</span>
+        </div>
+        <p id="error-message" class="d-none alert alert-danger"></p>
+        <a id="btn-retry" class="btn btn-secondary d-none">Retry</a>
+    </div>
+</div>
+
+<script>
+    document.getElementById('btn-retry').addEventListener('click', function () { window.location.reload() });
+    // send to server for registering
+    window.makeCredentialOptions = @Json.Serialize(Model);
+</script>
+<script src="~/js/webauthn/helpers.js" ></script>
+<script src="~/js/webauthn/register.js" ></script>

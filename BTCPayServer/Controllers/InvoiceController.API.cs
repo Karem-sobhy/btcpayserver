@@ -1,40 +1,40 @@
-﻿using System;
+using System;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
+using BTCPayServer.Abstractions.Constants;
+using BTCPayServer.Client;
 using BTCPayServer.Filters;
 using BTCPayServer.Models;
 using BTCPayServer.Security;
 using BTCPayServer.Services.Invoices;
 using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Cors;
 using Microsoft.AspNetCore.Mvc;
-using NBitpayClient;
 
 namespace BTCPayServer.Controllers
 {
     [BitpayAPIConstraint]
-    [Authorize(Policies.CanCreateInvoice.Key, AuthenticationSchemes = Policies.BitpayAuthentication)]
+    [Authorize(Policies.CanCreateInvoice, AuthenticationSchemes = AuthenticationSchemes.Bitpay)]
     public class InvoiceControllerAPI : Controller
     {
-        private InvoiceController _InvoiceController;
-        private InvoiceRepository _InvoiceRepository;
-        private BTCPayNetworkProvider _NetworkProvider;
+        private readonly InvoiceController _InvoiceController;
+        private readonly InvoiceRepository _InvoiceRepository;
 
         public InvoiceControllerAPI(InvoiceController invoiceController,
-                                    InvoiceRepository invoceRepository,
-                                    BTCPayNetworkProvider networkProvider)
+                                    InvoiceRepository invoiceRepository)
         {
-            this._InvoiceController = invoiceController;
-            this._InvoiceRepository = invoceRepository;
-            this._NetworkProvider = networkProvider;
+            _InvoiceController = invoiceController;
+            _InvoiceRepository = invoiceRepository;
         }
 
         [HttpPost]
         [Route("invoices")]
         [MediaTypeConstraint("application/json")]
-        public async Task<DataWrapper<InvoiceResponse>> CreateInvoice([FromBody] Invoice invoice)
+        public async Task<DataWrapper<InvoiceResponse>> CreateInvoice([FromBody] BitpayCreateInvoiceRequest invoice, CancellationToken cancellationToken)
         {
-            return await _InvoiceController.CreateInvoiceCore(invoice, HttpContext.GetStoreData(), HttpContext.Request.GetAbsoluteRoot());
+            if (invoice == null)
+                throw new BitpayHttpException(400, "Invalid invoice");
+            return await _InvoiceController.CreateInvoiceCore(invoice, HttpContext.GetStoreData(), HttpContext.Request.GetAbsoluteRoot(), cancellationToken: cancellationToken);
         }
 
         [HttpGet]
@@ -43,17 +43,16 @@ namespace BTCPayServer.Controllers
         {
             var invoice = (await _InvoiceRepository.GetInvoices(new InvoiceQuery()
             {
-                InvoiceId = id,
+                InvoiceId = new[] { id },
                 StoreId = new[] { HttpContext.GetStoreData().Id }
             })).FirstOrDefault();
             if (invoice == null)
                 throw new BitpayHttpException(404, "Object not found");
-            var resp = invoice.EntityToDTO(_NetworkProvider);
-            return new DataWrapper<InvoiceResponse>(resp);
+            return new DataWrapper<InvoiceResponse>(invoice.EntityToDTO());
         }
         [HttpGet]
         [Route("invoices")]
-        public async Task<DataWrapper<InvoiceResponse[]>> GetInvoices(
+        public async Task<IActionResult> GetInvoices(
             string token,
             DateTimeOffset? dateStart = null,
             DateTimeOffset? dateEnd = null,
@@ -63,25 +62,27 @@ namespace BTCPayServer.Controllers
             int? limit = null,
             int? offset = null)
         {
+            if (User.Identity.AuthenticationType == Security.Bitpay.BitpayAuthenticationTypes.Anonymous)
+                return Forbid(Security.Bitpay.BitpayAuthenticationTypes.Anonymous);
             if (dateEnd != null)
                 dateEnd = dateEnd.Value + TimeSpan.FromDays(1); //Should include the end day
 
             var query = new InvoiceQuery()
             {
-                Count = limit,
+                Take = limit,
                 Skip = offset,
                 EndDate = dateEnd,
                 StartDate = dateStart,
-                OrderId =  orderId == null ? null : new[] { orderId },
-                ItemCode =  itemCode == null ? null : new[] { itemCode },
+                OrderId = orderId == null ? null : new[] { orderId },
+                ItemCode = itemCode == null ? null : new[] { itemCode },
                 Status = status == null ? null : new[] { status },
                 StoreId = new[] { this.HttpContext.GetStoreData().Id }
             };
 
             var entities = (await _InvoiceRepository.GetInvoices(query))
-                            .Select((o) => o.EntityToDTO(_NetworkProvider)).ToArray();
+                            .Select((o) => o.EntityToDTO()).ToArray();
 
-            return DataWrapper.Create(entities);
+            return Json(DataWrapper.Create(entities));
         }
     }
 }

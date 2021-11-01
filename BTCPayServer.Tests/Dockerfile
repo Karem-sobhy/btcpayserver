@@ -1,17 +1,29 @@
-FROM microsoft/dotnet:2.1.500-sdk-alpine3.7 AS builder
-ENV DOTNET_SYSTEM_GLOBALIZATION_INVARIANT false
-RUN apk add --no-cache icu-libs
-ENV LC_ALL en_US.UTF-8
-ENV LANG en_US.UTF-8
+FROM mcr.microsoft.com/dotnet/core/sdk:3.1.413 AS builder
 
-# This should be removed soon https://github.com/dotnet/corefx/issues/30003
-RUN apk add --no-cache curl 
+RUN apt-get update && apt-get install -y --no-install-recommends chromium-driver \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /source
+COPY nuget.config nuget.config
+COPY Build/Common.csproj Build/Common.csproj
 COPY BTCPayServer/BTCPayServer.csproj BTCPayServer/BTCPayServer.csproj
-COPY BTCPayServer.Tests/BTCPayServer.Tests.csproj BTCPayServer.Tests/BTCPayServer.Tests.csproj
-RUN dotnet restore BTCPayServer.Tests/BTCPayServer.Tests.csproj
+COPY BTCPayServer.Common/BTCPayServer.Common.csproj BTCPayServer.Common/BTCPayServer.Common.csproj
+COPY BTCPayServer.Rating/BTCPayServer.Rating.csproj BTCPayServer.Rating/BTCPayServer.Rating.csproj
+COPY BTCPayServer.Data/BTCPayServer.Data.csproj BTCPayServer.Data/BTCPayServer.Data.csproj
+RUN cd BTCPayServer && dotnet restore
+COPY BTCPayServer.Common/. BTCPayServer.Common/.
+COPY BTCPayServer.Rating/. BTCPayServer.Rating/.
+COPY BTCPayServer.Data/. BTCPayServer.Data/.
+COPY BTCPayServer/. BTCPayServer/.
+COPY Build/Version.csproj Build/Version.csproj
+
+ENV SCREEN_HEIGHT 600 \
+    SCREEN_WIDTH 1200
+
 COPY . .
-RUN dotnet build
+
+ARG CONFIGURATION_NAME=Release
+RUN cd BTCPayServer.Tests && dotnet build --configuration ${CONFIGURATION_NAME} /p:CI_TESTS=true /p:RazorCompileOnBuild=true
 WORKDIR /source/BTCPayServer.Tests
+ENV CONFIGURATION_NAME=${CONFIGURATION_NAME}
 ENTRYPOINT ["./docker-entrypoint.sh"]

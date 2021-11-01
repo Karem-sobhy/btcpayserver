@@ -1,15 +1,9 @@
-﻿@inject SignInManager<ApplicationUser> SignInManager
-@{
-    var hasExternalLogins = (await SignInManager.GetExternalAuthenticationSchemesAsync()).Any();
-}
-
-<div class="nav flex-column nav-pills">
-    <a class="nav-link @ViewData.IsActivePage(ManageNavPages.Index)" asp-action="Index">Profile</a>
-    <a class="nav-link @ViewData.IsActivePage(ManageNavPages.ChangePassword)" asp-action="ChangePassword">Password</a>
-    @if (hasExternalLogins)
-    {
-        <a class="nav-link @ViewData.IsActivePage(ManageNavPages.ExternalLogins)" asp-action="ExternalLogins">External logins</a>
-    }
-    <a class="nav-link @ViewData.IsActivePage(ManageNavPages.TwoFactorAuthentication)" asp-action="TwoFactorAuthentication">Two-factor authentication</a>
-</div>
-
+@inject SignInManager<ApplicationUser> SignInManager
+<nav id="sideNav" class="nav flex-column mb-4">
+    <a id="@ManageNavPages.Index.ToString()" class="nav-link @ViewData.IsActivePage(ManageNavPages.Index)" asp-controller="Manage" asp-action="Index">Profile</a>
+    <a id="@ManageNavPages.ChangePassword.ToString()" class="nav-link @ViewData.IsActivePage(ManageNavPages.ChangePassword)"  asp-controller="Manage" asp-action="ChangePassword">Password</a>
+    <a id="@ManageNavPages.TwoFactorAuthentication.ToString()" class="nav-link @ViewData.IsActivePage(ManageNavPages.TwoFactorAuthentication)"  asp-controller="Manage" asp-action="TwoFactorAuthentication">Two-factor authentication</a>
+    <a id="@ManageNavPages.APIKeys.ToString()" class="nav-link @ViewData.IsActivePage(ManageNavPages.APIKeys)"  asp-controller="Manage"  asp-action="APIKeys">API Keys</a>
+    <a id="@ManageNavPages.Notifications.ToString()" class="nav-link @ViewData.IsActivePage(ManageNavPages.Notifications)"  asp-controller="Manage" asp-action="NotificationSettings">Notifications</a>
+    <vc:ui-extension-point location="user-nav" model="@Model"/>
+</nav>
